@@ -43,6 +43,7 @@ Enables "Ghost" files in a directory listing.
 *   **Argument**: `struct hymo_ioctl_arg`
     *   `src`: Target directory path
 *   **Mechanism**:
+    *   **Trigger**: When `add` is called, if the source path does not exist, HymoFS automatically identifies the parent directory and adds it to an internal injection list.
     *   **Listing**: Hooks `getdents/getdents64`. After the real directory entries are listed, HymoFS artificially appends entries defined by `add` rules that reside within this directory.
     *   **Mtime Spoofing**: Hooks `vfs_getattr` in `fs/stat.c`. Forces the directory's modification time (`mtime`) and change time (`ctime`) to report the current system time.
 

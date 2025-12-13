@@ -43,6 +43,7 @@ HymoFS 是一个内核级的路径操控和隐藏框架，专为 Android 上的�
 *   **参数**: `struct hymo_ioctl_arg`
     *   `src`: 目标目录路径
 *   **机制**:
+    *   **触发**: 当调用 `add` 时，如果源路径不存在，HymoFS 会自动识别父目录并将其添加到内部注入列表中。
     *   **列表**: Hook 了 `getdents/getdents64`。在真实的目录条目列出之后，HymoFS 会人为地追加那些位于该目录下且由 `add` 规则定义的条目。
     *   **Mtime 伪装**: Hook 了 `fs/stat.c` 中的 `vfs_getattr`。强制将目录的修改时间 (`mtime`) 和改变时间 (`ctime`) 报告为当前系统时间。
 

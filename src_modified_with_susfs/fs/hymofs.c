@@ -27,13 +27,16 @@
 #include <linux/cred.h>
 #include <linux/uidgid.h>
 #include <linux/vmalloc.h>
+#include <linux/atomic.h>
+#include <linux/spinlock.h>
+#include <linux/kernel.h>
 
 #include "hymofs.h"
 #include "hymofs_ioctl.h"
 
 #ifdef CONFIG_HYMOFS
 
-/* HymoFS God Mode - Advanced Path Manipulation */
+/* HymoFS - Advanced Path Manipulation and Hiding */
 #define HYMO_HASH_BITS 10
 
 struct hymo_entry {
@@ -58,6 +61,12 @@ static DEFINE_HASHTABLE(hymo_inject_dirs, HYMO_HASH_BITS);
 static DEFINE_SPINLOCK(hymo_lock);
 atomic_t hymo_version = ATOMIC_INIT(0);
 EXPORT_SYMBOL(hymo_version);
+
+static bool hymo_debug_enabled = false;
+#define hymo_log(fmt, ...) do { \
+    if (hymo_debug_enabled) \
+        printk(KERN_INFO "hymofs: " fmt, ##__VA_ARGS__); \
+} while(0)
 
 static void hymo_cleanup(void) {
     struct hymo_entry *entry;
@@ -106,6 +115,14 @@ static long hymo_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
         return atomic_read(&hymo_version);
     }
 
+    if (cmd == HYMO_IOC_SET_DEBUG) {
+        int val;
+        if (copy_from_user(&val, (void __user *)arg, sizeof(val))) return -EFAULT;
+        hymo_debug_enabled = !!val;
+        printk(KERN_INFO "hymofs: debug mode %s\n", hymo_debug_enabled ? "enabled" : "disabled");
+        return 0;
+    }
+
     if (copy_from_user(&req, (void __user *)arg, sizeof(req))) return -EFAULT;
 
     if (req.src) {
@@ -152,6 +169,7 @@ static long hymo_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
             atomic_inc(&hymo_version);
             spin_unlock_irqrestore(&hymo_lock, flags);
             break;
+        }
 
         case HYMO_IOC_HIDE_RULE:
             if (!src) { ret = -EINVAL; break; }
@@ -203,6 +221,7 @@ static long hymo_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
 
         case HYMO_IOC_DEL_RULE:
             if (!src) { ret = -EINVAL; break; }
+            hymo_log("del rule: src=%s\n", src);
             hash = full_name_hash(NULL, src, strlen(src));
             spin_lock_irqsave(&hymo_lock, flags);
             
@@ -312,8 +331,6 @@ static ssize_t hymo_read(struct file *file, char __user *buf, size_t count, loff
     unsigned long flags;
     ssize_t ret;
 
-    // printk(KERN_INFO "hymo_read: count=%zu, ppos=%lld\n", count, *ppos);
-
     kbuf = vmalloc(size);
     if (!kbuf) return -ENOMEM;
     memset(kbuf, 0, size);
@@ -384,6 +401,7 @@ char *__hymofs_resolve_target(const char *pathname)
     hash_for_each_possible(hymo_paths, entry, node, hash) {
         if (strcmp(entry->src, pathname) == 0) {
             target = kstrdup(entry->target, GFP_ATOMIC);
+            hymo_log("redirect %s -> %s\n", pathname, target);
             break;
         }
     }
@@ -413,6 +431,7 @@ bool __hymofs_should_hide(const char *pathname)
     hash_for_each_possible(hymo_hide_paths, entry, node, hash) {
         if (strcmp(entry->path, pathname) == 0) {
             found = true;
+            hymo_log("hide %s\n", pathname);
             break;
         }
     }
@@ -493,6 +512,7 @@ int hymofs_populate_injected_list(const char *dir_path, struct dentry *parent, s
         }
     }
     if (should_inject) {
+        hymo_log("injecting entries for %s\n", dir_path);
         hash_for_each(hymo_paths, bkt, entry, node) {
             if (strncmp(entry->src, dir_path, dir_len) == 0) {
                 char *name = NULL;
@@ -507,7 +527,10 @@ int hymofs_populate_injected_list(const char *dir_path, struct dentry *parent, s
                     if (item) {
                         item->name = kstrdup(name, GFP_ATOMIC);
                         item->type = entry->type;
-                        if (item->name) list_add(&item->list, head);
+                        if (item->name) {
+                            list_add(&item->list, head);
+                            hymo_log("  + injected %s\n", name);
+                        }
                         else kfree(item);
                     }
                 }
@@ -526,7 +549,7 @@ struct filename *hymofs_handle_getname(struct filename *result)
 
     if (IS_ERR(result)) return result;
 
-    /* HymoFS God Mode Hook */
+    /* HymoFS Path Hiding Hook */
     if (hymofs_should_hide(result->name)) {
         putname(result);
         /* Return ENOENT directly */
@@ -595,6 +618,7 @@ struct linux_dirent {
 	char		d_name[];
 };
 
+/* Inject virtual entries into getdents system call */
 int hymofs_inject_entries(struct hymo_readdir_context *ctx, void __user **dir_ptr, int *count, loff_t *pos)
 {
     struct linux_dirent __user *current_dir = *dir_ptr;
@@ -671,6 +695,7 @@ int hymofs_inject_entries(struct hymo_readdir_context *ctx, void __user **dir_pt
 }
 EXPORT_SYMBOL(hymofs_inject_entries);
 
+/* Inject virtual entries into getdents64 system call */
 int hymofs_inject_entries64(struct hymo_readdir_context *ctx, void __user **dir_ptr, int *count, loff_t *pos)
 {
     struct linux_dirent64 __user *current_dir = *dir_ptr;
@@ -747,6 +772,7 @@ int hymofs_inject_entries64(struct hymo_readdir_context *ctx, void __user **dir_
 }
 EXPORT_SYMBOL(hymofs_inject_entries64);
 
+/* Update timestamps for injected directories to appear current */
 void hymofs_spoof_stat(const struct path *path, struct kstat *stat)
 {
     char *buf = (char *)__get_free_page(GFP_KERNEL);
@@ -754,6 +780,7 @@ void hymofs_spoof_stat(const struct path *path, struct kstat *stat)
         char *p = d_path(path, buf, PAGE_SIZE);
         if (!IS_ERR(p)) {
             if (hymofs_should_spoof_mtime(p)) {
+                hymo_log("spoofing stat for %s\n", p);
                 ktime_get_real_ts64(&stat->mtime);
                 stat->ctime = stat->mtime;
             }
