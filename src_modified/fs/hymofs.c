@@ -40,13 +40,15 @@
 #ifdef CONFIG_HYMOFS
 
 /* HymoFS - Advanced Path Manipulation and Hiding */
-#define HYMO_HASH_BITS 10
+/* Increased hash bits to reduce collisions with large number of rules */
+#define HYMO_HASH_BITS 16
 
 struct hymo_entry {
     char *src;
     char *target;
     unsigned char type;
     struct hlist_node node;
+    struct hlist_node target_node;
 };
 struct hymo_hide_entry {
     char *path;
@@ -64,6 +66,7 @@ struct hymo_xattr_sb_entry {
 };
 
 static DEFINE_HASHTABLE(hymo_paths, HYMO_HASH_BITS);
+static DEFINE_HASHTABLE(hymo_targets, HYMO_HASH_BITS);
 static DEFINE_HASHTABLE(hymo_hide_paths, HYMO_HASH_BITS);
 static DEFINE_HASHTABLE(hymo_inject_dirs, HYMO_HASH_BITS);
 static DEFINE_HASHTABLE(hymo_xattr_sbs, HYMO_HASH_BITS);
@@ -88,6 +91,7 @@ static void hymo_cleanup(void) {
     int bkt;
     hash_for_each_safe(hymo_paths, bkt, tmp, entry, node) {
         hash_del(&entry->node);
+        hash_del(&entry->target_node);
         kfree(entry->src);
         kfree(entry->target);
         kfree(entry);
@@ -374,9 +378,12 @@ static long hymo_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
             spin_lock_irqsave(&hymo_lock, flags);
             hash_for_each_possible(hymo_paths, entry, node, hash) {
                 if (strcmp(entry->src, src) == 0) {
+                    hash_del(&entry->target_node);
                     kfree(entry->target);
                     entry->target = kstrdup(target, GFP_ATOMIC);
                     entry->type = req.type;
+                    if (entry->target)
+                        hash_add(hymo_targets, &entry->target_node, full_name_hash(NULL, entry->target, strlen(entry->target)));
                     found = true;
                     break;
                 }
@@ -387,9 +394,10 @@ static long hymo_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
                     entry->src = kstrdup(src, GFP_ATOMIC);
                     entry->target = kstrdup(target, GFP_ATOMIC);
                     entry->type = req.type;
-                    if (entry->src && entry->target)
+                    if (entry->src && entry->target) {
                         hash_add(hymo_paths, &entry->node, hash);
-                    else {
+                        hash_add(hymo_targets, &entry->target_node, full_name_hash(NULL, entry->target, strlen(entry->target)));
+                    } else {
                         kfree(entry->src);
                         kfree(entry->target);
                         kfree(entry);
@@ -501,6 +509,7 @@ static long hymo_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
             hash_for_each_possible(hymo_paths, entry, node, hash) {
                 if (strcmp(entry->src, src) == 0) {
                     hash_del(&entry->node);
+                    hash_del(&entry->target_node);
                     kfree(entry->src);
                     kfree(entry->target);
                     kfree(entry);
@@ -665,6 +674,7 @@ static int __init hymofs_init(void)
 {
     spin_lock_init(&hymo_lock);
     hash_init(hymo_paths);
+    hash_init(hymo_targets);
     hash_init(hymo_hide_paths);
     hash_init(hymo_inject_dirs);
     hash_init(hymo_xattr_sbs);
@@ -706,14 +716,16 @@ char *__hymofs_reverse_lookup(const char *pathname)
 {
     unsigned long flags;
     struct hymo_entry *entry;
-    int bkt;
+    u32 hash;
     char *src = NULL;
 
     if (atomic_read(&hymo_version) == 0) return NULL;
     if (!pathname) return NULL;
 
+    hash = full_name_hash(NULL, pathname, strlen(pathname));
+
     spin_lock_irqsave(&hymo_lock, flags);
-    hash_for_each(hymo_paths, bkt, entry, node) {
+    hash_for_each_possible(hymo_targets, entry, target_node, hash) {
         if (strcmp(entry->target, pathname) == 0) {
             src = kstrdup(entry->src, GFP_ATOMIC);
             break;
