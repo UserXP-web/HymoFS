@@ -284,6 +284,9 @@ static int vfs_statx(int dfd, struct filename *filename, int flags,
 	struct path path;
 	unsigned int lookup_flags = getname_statx_lookup_flags(flags);
 	int error;
+#ifdef CONFIG_HYMOFS
+	struct filename *hymo_filename = NULL;
+#endif
 
 #ifdef CONFIG_KSU_SUSFS
 	if (likely(susfs_is_current_proc_umounted()) || !ksu_su_compat_enabled) {
@@ -304,6 +307,15 @@ orig_flow:
 
 retry:
 	error = filename_lookup(dfd, filename, lookup_flags, &path, NULL);
+	
+#ifdef CONFIG_HYMOFS
+	/* HymoFS: Handle merge directory - relative path + dirfd case */
+	if (error == -ENOENT && dfd >= 0 && filename->name[0] != '/') {
+		hymo_filename = hymofs_resolve_relative(dfd, filename->name);
+		if (hymo_filename)
+			error = filename_lookup(AT_FDCWD, hymo_filename, lookup_flags, &path, NULL);
+	}
+#endif
 	if (error)
 		goto out;
 
@@ -330,6 +342,10 @@ retry:
 		goto retry;
 	}
 out:
+#ifdef CONFIG_HYMOFS
+	if (hymo_filename)
+		putname(hymo_filename);
+#endif
 	return error;
 }
 

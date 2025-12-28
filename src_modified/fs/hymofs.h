@@ -15,6 +15,22 @@
 struct hymo_merge_target_node {
     struct list_head list;
     char *target;
+    struct dentry *target_dentry;  /* Cached dentry for fast lookup */
+};
+
+/* Bloom filter for merge target filenames - ultra fast O(1) check */
+#define HYMO_BLOOM_BITS 10  /* 1024 bits = 128 bytes */
+#define HYMO_BLOOM_SIZE (1 << HYMO_BLOOM_BITS)
+#define HYMO_BLOOM_MASK (HYMO_BLOOM_SIZE - 1)
+
+/* Hash table for merge target filenames - O(1) lookup */
+#define HYMO_MERGE_HASH_BITS 6
+#define HYMO_MERGE_HASH_SIZE (1 << HYMO_MERGE_HASH_BITS)
+
+struct hymo_merge_file_entry {
+    struct hlist_node node;
+    char *name;
+    int namlen;
 };
 
 struct hymo_readdir_context {
@@ -25,6 +41,10 @@ struct hymo_readdir_context {
     bool entry_written;
     struct list_head merge_targets;
     bool is_replace_mode;
+    bool dir_has_hidden;  /* Fast path: skip hide check if false */
+    bool has_merge_files; /* Fast path: skip merge check if false */
+    unsigned long bloom_filter[HYMO_BLOOM_SIZE / BITS_PER_LONG]; /* Bloom filter for merge filenames */
+    struct hlist_head merge_files[HYMO_MERGE_HASH_SIZE]; /* Pre-built hash of merge target filenames */
 };
 
 extern atomic_t hymo_atomiconfig;
@@ -46,12 +66,34 @@ struct hymo_name_list {
 
 struct filename;
 struct filename *hymofs_handle_getname(struct filename *result);
+struct filename *hymofs_resolve_relative(int dfd, const char *name);
 
 char *__hymofs_resolve_target(const char *pathname);
 int __hymofs_reverse_lookup(const char *pathname, char *buf, size_t buflen);
 bool __hymofs_should_hide(const char *pathname, size_t len);
 bool __hymofs_should_spoof_mtime(const char *pathname);
 int hymofs_populate_injected_list(const char *dir_path, struct dentry *parent, struct list_head *head);
+
+/* Fast O(1) inode-based hide check - core function */
+bool __hymofs_is_inode_hidden(struct inode *inode);
+
+/* Inline wrapper with fast-path checks */
+static __always_inline bool hymofs_is_inode_hidden(struct inode *inode)
+{
+    /* Fast path: NULL checks */
+    if (unlikely(!inode || !inode->i_mapping))
+        return false;
+    
+    /* Fast path: Root sees everything */
+    if (uid_eq(current_uid(), GLOBAL_ROOT_UID))
+        return false;
+    
+    /* Fast path: No rules loaded */
+    if (atomic_read(&hymo_atomiconfig) == 0)
+        return false;
+    
+    return __hymofs_is_inode_hidden(inode);
+}
 
 static inline void hymofs_prepare_readdir(struct hymo_readdir_context *ctx, struct file *file)
 {
@@ -111,11 +153,13 @@ static inline ssize_t hymofs_filter_xattrs(struct dentry *dentry, char *klist, s
 static inline bool hymofs_is_overlay_xattr(struct dentry *dentry, const char *name) { return false; }
 
 static inline struct filename *hymofs_handle_getname(struct filename *result) { return result; }
+static inline struct filename *hymofs_resolve_relative(int dfd, const char *name) { return NULL; }
 static inline char *hymofs_resolve_target(const char *pathname) { return NULL; }
 static inline char *hymofs_reverse_lookup(const char *pathname) { return NULL; }
 static inline bool hymofs_should_hide(const char *pathname) { return false; }
 static inline bool hymofs_should_spoof_mtime(const char *pathname) { return false; }
 static inline int hymofs_populate_injected_list(const char *dir_path, struct dentry *parent, struct list_head *head) { return 0; }
+static inline bool hymofs_is_inode_hidden(struct inode *inode) { return false; }
 
 #endif /* CONFIG_HYMOFS */
 

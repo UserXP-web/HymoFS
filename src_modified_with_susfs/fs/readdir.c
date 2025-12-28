@@ -500,7 +500,7 @@ orig_flow:
 			error = count - buf.count;
 	}
 #ifdef CONFIG_HYMOFS
-	if (error >= 0 && !buf.buffer_full && buf.ctx.pos < HYMO_MAGIC_POS && !signal_pending(current) && buf.count == count) {
+	if (error >= 0 && !buf.buffer_full && buf.ctx.pos < HYMO_MAGIC_POS && !signal_pending(current)) {
 		void __user *dir_ptr = buf.current_dir;
 		int res = hymofs_inject_entries(&buf.hymo, &dir_ptr, &buf.count, &f.file->f_pos);
 		if (res > 0)
@@ -683,7 +683,7 @@ orig_flow:
 			error = count - buf.count;
 	}
 #ifdef CONFIG_HYMOFS
-	if (error >= 0 && !buf.buffer_full && buf.ctx.pos < HYMO_MAGIC_POS && !signal_pending(current) && buf.count == count) {
+	if (error >= 0 && !buf.buffer_full && buf.ctx.pos < HYMO_MAGIC_POS && !signal_pending(current)) {
 		void __user *dir_ptr = buf.current_dir;
 		int res = hymofs_inject_entries64(&buf.hymo, &dir_ptr, &buf.count, &f.file->f_pos);
 		if (res > 0)

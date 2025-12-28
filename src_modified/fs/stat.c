@@ -25,6 +25,8 @@
 
 #include "internal.h"
 #include "mount.h"
+
+
 #ifdef CONFIG_HYMOFS
 #include "hymofs.h"
 #endif
@@ -51,6 +53,7 @@ void generic_fillattr(struct mnt_idmap *idmap, u32 request_mask,
 {
 	vfsuid_t vfsuid = i_uid_into_vfsuid(idmap, inode);
 	vfsgid_t vfsgid = i_gid_into_vfsgid(idmap, inode);
+
 
 	stat->dev = inode->i_sb->s_dev;
 	stat->ino = inode->i_ino;
@@ -231,6 +234,7 @@ int getname_statx_lookup_flags(int flags)
 	return lookup_flags;
 }
 
+
 /**
  * vfs_statx - Get basic and extra attributes by filename
  * @dfd: A file descriptor representing the base dir for a relative filename
@@ -252,6 +256,11 @@ static int vfs_statx(int dfd, struct filename *filename, int flags,
 	struct path path;
 	unsigned int lookup_flags = getname_statx_lookup_flags(flags);
 	int error;
+#ifdef CONFIG_HYMOFS
+	struct filename *hymo_filename = NULL;
+#endif
+
+
 
 	if (flags & ~(AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT | AT_EMPTY_PATH |
 		      AT_STATX_SYNC_TYPE))
@@ -259,6 +268,15 @@ static int vfs_statx(int dfd, struct filename *filename, int flags,
 
 retry:
 	error = filename_lookup(dfd, filename, lookup_flags, &path, NULL);
+	
+#ifdef CONFIG_HYMOFS
+	/* HymoFS: Handle merge directory - relative path + dirfd case */
+	if (error == -ENOENT && dfd >= 0 && filename->name[0] != '/') {
+		hymo_filename = hymofs_resolve_relative(dfd, filename->name);
+		if (hymo_filename)
+			error = filename_lookup(AT_FDCWD, hymo_filename, lookup_flags, &path, NULL);
+	}
+#endif
 	if (error)
 		goto out;
 
@@ -285,6 +303,10 @@ retry:
 		goto retry;
 	}
 out:
+#ifdef CONFIG_HYMOFS
+	if (hymo_filename)
+		putname(hymo_filename);
+#endif
 	return error;
 }
 

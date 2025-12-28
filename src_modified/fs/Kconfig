@@ -418,4 +418,11 @@ config HYMOFS_USE_KSU
 	help
 	  Enable KernelSU integration for HymoFS.
 
+config HYMOFS_LSMBPS
+	bool "HymoFS LSM Bypass"
+	depends on HYMOFS
+	default n
+	help
+	  Enable LSM bypass support for HymoFS.
+
 endmenu
