@@ -9,7 +9,7 @@ env:
   proxy: On
   APPLY_HYMOFS: On
   APPLY_ADIOS: On
-  KERNEL_MANIFEST: common-android16-6.12-2025-09
+  KERNEL_MANIFEST: common-android16-6.12-2025-12
 
 on:
   push
