@@ -142,7 +142,7 @@ index 410a8f553..eb30ad9f0 100644
 +
  endmenu
 diff --git a/fs/Makefile b/fs/Makefile
-index 102e4cd2b..0f70f18e2 100644
+index 102e4cd2b..af846a467 100644
 --- a/fs/Makefile
 +++ b/fs/Makefile
 @@ -17,6 +17,8 @@ obj-y :=	open.o read_write.o file_table.o super.o \
@@ -154,15 +154,6 @@ index 102e4cd2b..0f70f18e2 100644
  ifeq ($(CONFIG_BLOCK),y)
  obj-y +=	buffer.o direct-io.o mpage.o
  else
-@@ -36,7 +38,7 @@ obj-$(CONFIG_AIO)               += aio.o
- obj-$(CONFIG_FS_DAX)		+= dax.o
- obj-$(CONFIG_FS_ENCRYPTION)	+= crypto/
- obj-$(CONFIG_FS_VERITY)		+= verity/
--obj-$(CONFIG_FILE_LOCKING)      += locks.o
-+obj-$(CONFIG_FILE_LOCKING)      += locks.o+obj-$(CONFIG_HYMOFS) += hymofs.o
- obj-$(CONFIG_BINFMT_MISC)	+= binfmt_misc.o
- obj-$(CONFIG_BINFMT_SCRIPT)	+= binfmt_script.o
- obj-$(CONFIG_BINFMT_ELF)	+= binfmt_elf.o
 diff --git a/fs/d_path.c b/fs/d_path.c
 index 56a6ee4c6..e5c373fa5 100644
 --- a/fs/d_path.c
