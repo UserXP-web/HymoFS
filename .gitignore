@@ -57,3 +57,5 @@ dkms.conf
 /.idea
 /manager_app
 local.properties
+
+/patch_workspace/
