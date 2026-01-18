@@ -12,7 +12,6 @@ MANUAL_BRANCH=false
 
 KERNEL_DIR=""
 DEFCONFIG_PATH=""
-WITH_SUSFS=false
 
 function show_help {
     echo "HymoFS Setup Script"
@@ -31,7 +30,6 @@ while [[ "$#" -gt 0 ]]; do
     case $1 in
         kernel-dir) KERNEL_DIR="$2"; shift ;;
         defconfig) DEFCONFIG_PATH="$2"; shift ;;
-        with-susfs) WITH_SUSFS=true ;;
         branch) BRANCH="$2"; MANUAL_BRANCH=true; shift ;;
         repo) REPO_URL="$2"; shift ;;
         help) show_help ;;
@@ -89,9 +87,12 @@ if [ "$MANUAL_BRANCH" = false ]; then
             elif [ "$KVER" -eq 6 ] && [ "$KPATCH" -eq 6 ]; then
                 BRANCH="android15_6.6"
                 echo ">>> Auto-selected branch: $BRANCH"
+            elif [ "$KVER" -eq 5 ] && [ "$KPATCH" -eq 15 ]; then
+                BRANCH="android13_5.15"
+                echo ">>> Auto-selected branch: $BRANCH"
             else
                 echo "Error: Unsupported kernel version detected: $FULL_VER"
-                echo "Currently only Kernel 6.1 and 6.6 are supported."
+                echo "Currently only Kernel5.15, 6.1 and 6.6 are supported."
                 echo "You can force a specific branch using branch <name>"
                 exit 1
             fi
@@ -155,7 +156,7 @@ fi
 
 echo ">>> Modifying defconfig..."
 
-if grep -q "CONFIG_KSU_HYMOFS=y" "$TARGET_DEFCONFIG"; then
+if grep -q "CONFIG_HYMOFS=y" "$TARGET_DEFCONFIG"; then
     echo "  [*] defconfig already contains CONFIG_HYMOFS, skipping."
 else
     echo "" >> "$TARGET_DEFCONFIG"
