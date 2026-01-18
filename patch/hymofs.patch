@@ -1,5 +1,5 @@
 diff --git a/fs/Kconfig b/fs/Kconfig
-index 410a8f553..eb30ad9f0 100644
+index 2c756044e..7e38831e4 100644
 --- a/fs/Kconfig
 +++ b/fs/Kconfig
 @@ -387,4 +387,138 @@ source "fs/unicode/Kconfig"
@@ -142,10 +142,10 @@ index 410a8f553..eb30ad9f0 100644
 +
  endmenu
 diff --git a/fs/Makefile b/fs/Makefile
-index 102e4cd2b..967d67f3f 100644
+index e4adb9882..8a88ab632 100644
 --- a/fs/Makefile
 +++ b/fs/Makefile
-@@ -17,6 +17,8 @@ obj-y :=	open.o read_write.o file_table.o super.o \
+@@ -18,6 +18,8 @@ obj-y :=	open.o read_write.o file_table.o super.o \
  		fs_types.o fs_context.o fs_parser.o fsopen.o init.o \
  		kernel_read_file.o remap_range.o
  
@@ -155,7 +155,7 @@ index 102e4cd2b..967d67f3f 100644
  obj-y +=	buffer.o direct-io.o mpage.o
  else
 diff --git a/fs/d_path.c b/fs/d_path.c
-index 56a6ee4c6..e5c373fa5 100644
+index cd60c7535..9cc2c307e 100644
 --- a/fs/d_path.c
 +++ b/fs/d_path.c
 @@ -7,6 +7,9 @@
@@ -168,7 +168,7 @@ index 56a6ee4c6..e5c373fa5 100644
  
  struct prepend_buffer {
  	char *buf;
-@@ -234,6 +237,9 @@ char *d_absolute_path(const struct path *path,
+@@ -236,6 +239,9 @@ char *d_absolute_path(const struct path *path,
  		return ERR_PTR(-EINVAL);
  	return extract_string(&b);
  }
@@ -178,11 +178,10 @@ index 56a6ee4c6..e5c373fa5 100644
  
  static void get_fs_root_rcu(struct fs_struct *fs, struct path *root)
  {
-@@ -289,8 +295,57 @@ char *d_path(const struct path *path, char *buf, int buflen)
- 		prepend_char(&b, 0);
+@@ -292,7 +298,57 @@ char *d_path(const struct path *path, char *buf, int buflen)
  	prepend_path(path, &root, &b);
  	rcu_read_unlock();
--
+ 
 +#ifdef CONFIG_HYMOFS
 +    {
 +        char *res = extract_string(&b);
@@ -2545,10 +2544,10 @@ index 000000000..14e31b011
 +
 +#endif /* CONFIG_HYMOFS */
 diff --git a/fs/namei.c b/fs/namei.c
-index 8e9c0b567..30af18774 100644
+index f376c938f..1bb1b859a 100644
 --- a/fs/namei.c
 +++ b/fs/namei.c
-@@ -43,6 +43,9 @@
+@@ -42,6 +42,9 @@
  
  #include "internal.h"
  #include "mount.h"
@@ -2558,7 +2557,7 @@ index 8e9c0b567..30af18774 100644
  
  /* [Feb-1997 T. Schoebel-Theuer]
   * Fundamental changes in the pathname lookup mechanisms (namei)
-@@ -125,8 +128,26 @@
+@@ -124,8 +127,26 @@
  
  #define EMBEDDED_NAME_MAX	(PATH_MAX - offsetof(struct filename, iname))
  
@@ -2610,21 +2609,20 @@ index fa762c5fb..650d56b85 100644
  	seq_putc(m, '\n');
  	return 0;
 diff --git a/fs/readdir.c b/fs/readdir.c
-index 9c53edb60..5bb548300 100644
+index 09e8ed7d4..bf17f0bdb 100644
 --- a/fs/readdir.c
 +++ b/fs/readdir.c
-@@ -24,6 +24,10 @@
+@@ -23,6 +23,9 @@
+ #include <linux/uaccess.h>
  
  #include <asm/unaligned.h>
- 
 +#ifdef CONFIG_HYMOFS
 +#include <linux/hymofs.h>
 +#endif
-+
+ 
  /*
   * Note the "unsafe_put_user() semantics: we goto a
-  * label for errors.
-@@ -136,6 +140,9 @@ struct old_linux_dirent {
+@@ -136,6 +139,9 @@ struct old_linux_dirent {
  
  struct readdir_callback {
  	struct dir_context ctx;
@@ -2634,7 +2632,7 @@ index 9c53edb60..5bb548300 100644
  	struct old_linux_dirent __user * dirent;
  	int result;
  };
-@@ -189,11 +196,17 @@ SYSCALL_DEFINE3(old_readdir, unsigned int, fd,
+@@ -189,11 +195,17 @@ SYSCALL_DEFINE3(old_readdir, unsigned int, fd,
  
  	if (!f.file)
  		return -EBADF;
@@ -2652,7 +2650,7 @@ index 9c53edb60..5bb548300 100644
  	fdput_pos(f);
  	return error;
  }
-@@ -213,10 +226,16 @@ struct linux_dirent {
+@@ -213,10 +225,16 @@ struct linux_dirent {
  
  struct getdents_callback {
  	struct dir_context ctx;
@@ -2668,8 +2666,8 @@ index 9c53edb60..5bb548300 100644
 +#endif
  };
  
- static bool filldir(struct dir_context *ctx, const char *name, int namlen,
-@@ -230,12 +249,20 @@ static bool filldir(struct dir_context *ctx, const char *name, int namlen,
+ static int filldir(struct dir_context *ctx, const char *name, int namlen,
+@@ -230,12 +248,20 @@ static int filldir(struct dir_context *ctx, const char *name, int namlen,
  		sizeof(long));
  	int prev_reclen;
  
@@ -2679,19 +2677,19 @@ index 9c53edb60..5bb548300 100644
 +
  	buf->error = verify_dirent_name(name, namlen);
  	if (unlikely(buf->error))
- 		return false;
+ 		return buf->error;
  	buf->error = -EINVAL;	/* only used if we fail.. */
 -	if (reclen > buf->count)
 +	if (reclen > buf->count){
 +#ifdef CONFIG_HYMOFS
 +		buf->buffer_full = true;
 +#endif
- 		return false;
+ 		return -EINVAL;
 +	}
  	d_ino = ino;
  	if (sizeof(d_ino) < sizeof(ino) && d_ino != ino) {
  		buf->error = -EOVERFLOW;
-@@ -276,6 +303,9 @@ SYSCALL_DEFINE3(getdents, unsigned int, fd,
+@@ -276,6 +302,9 @@ SYSCALL_DEFINE3(getdents, unsigned int, fd,
  		.ctx.actor = filldir,
  		.count = count,
  		.current_dir = dirent
@@ -2701,7 +2699,7 @@ index 9c53edb60..5bb548300 100644
  	};
  	int error;
  
-@@ -283,6 +313,25 @@ SYSCALL_DEFINE3(getdents, unsigned int, fd,
+@@ -283,6 +312,21 @@ SYSCALL_DEFINE3(getdents, unsigned int, fd,
  	if (!f.file)
  		return -EBADF;
  
@@ -2719,15 +2717,11 @@ index 9c53edb60..5bb548300 100644
 +#ifdef CONFIG_HYMOFS_HIDE_ENTRIES
 +		hymofs_cleanup_readdir(&buf.hymo);
 +#endif
-+		fdput_pos(f);
-+		return error;
-+	}
-+#endif
 +
  	error = iterate_dir(f.file, &buf.ctx);
  	if (error >= 0)
  		error = buf.error;
-@@ -295,16 +344,33 @@ SYSCALL_DEFINE3(getdents, unsigned int, fd,
+@@ -295,16 +339,33 @@ SYSCALL_DEFINE3(getdents, unsigned int, fd,
  		else
  			error = count - buf.count;
  	}
@@ -2760,8 +2754,8 @@ index 9c53edb60..5bb548300 100644
 +#endif
  };
  
- static bool filldir64(struct dir_context *ctx, const char *name, int namlen,
-@@ -317,12 +383,20 @@ static bool filldir64(struct dir_context *ctx, const char *name, int namlen,
+ static int filldir64(struct dir_context *ctx, const char *name, int namlen,
+@@ -317,12 +378,20 @@ static int filldir64(struct dir_context *ctx, const char *name, int namlen,
  		sizeof(u64));
  	int prev_reclen;
  
@@ -2771,19 +2765,19 @@ index 9c53edb60..5bb548300 100644
 +
  	buf->error = verify_dirent_name(name, namlen);
  	if (unlikely(buf->error))
- 		return false;
+ 		return buf->error;
  	buf->error = -EINVAL;	/* only used if we fail.. */
 -	if (reclen > buf->count)
 +	if (reclen > buf->count){
 +#ifdef CONFIG_HYMOFS
 +		buf->buffer_full = true;
 +#endif
- 		return false;
+ 		return -EINVAL;
 +	}
  	prev_reclen = buf->prev_reclen;
  	if (prev_reclen && signal_pending(current))
- 		return false;
-@@ -359,6 +433,9 @@ SYSCALL_DEFINE3(getdents64, unsigned int, fd,
+ 		return -EINTR;
+@@ -359,6 +428,9 @@ SYSCALL_DEFINE3(getdents64, unsigned int, fd,
  		.ctx.actor = filldir64,
  		.count = count,
  		.current_dir = dirent
@@ -2793,7 +2787,7 @@ index 9c53edb60..5bb548300 100644
  	};
  	int error;
  
-@@ -366,6 +443,25 @@ SYSCALL_DEFINE3(getdents64, unsigned int, fd,
+@@ -366,6 +438,25 @@ SYSCALL_DEFINE3(getdents64, unsigned int, fd,
  	if (!f.file)
  		return -EBADF;
  
@@ -2819,7 +2813,7 @@ index 9c53edb60..5bb548300 100644
  	error = iterate_dir(f.file, &buf.ctx);
  	if (error >= 0)
  		error = buf.error;
-@@ -379,6 +475,17 @@ SYSCALL_DEFINE3(getdents64, unsigned int, fd,
+@@ -379,6 +470,17 @@ SYSCALL_DEFINE3(getdents64, unsigned int, fd,
  		else
  			error = count - buf.count;
  	}
@@ -2837,7 +2831,7 @@ index 9c53edb60..5bb548300 100644
  	fdput_pos(f);
  	return error;
  }
-@@ -393,6 +500,9 @@ struct compat_old_linux_dirent {
+@@ -393,6 +495,9 @@ struct compat_old_linux_dirent {
  
  struct compat_readdir_callback {
  	struct dir_context ctx;
@@ -2847,7 +2841,7 @@ index 9c53edb60..5bb548300 100644
  	struct compat_old_linux_dirent __user *dirent;
  	int result;
  };
-@@ -448,10 +558,17 @@ COMPAT_SYSCALL_DEFINE3(old_readdir, unsigned int, fd,
+@@ -448,10 +553,17 @@ COMPAT_SYSCALL_DEFINE3(old_readdir, unsigned int, fd,
  	if (!f.file)
  		return -EBADF;
  
@@ -2865,7 +2859,7 @@ index 9c53edb60..5bb548300 100644
  	fdput_pos(f);
  	return error;
  }
-@@ -465,6 +582,9 @@ struct compat_linux_dirent {
+@@ -465,6 +577,9 @@ struct compat_linux_dirent {
  
  struct compat_getdents_callback {
  	struct dir_context ctx;
@@ -2875,7 +2869,7 @@ index 9c53edb60..5bb548300 100644
  	struct compat_linux_dirent __user *current_dir;
  	int prev_reclen;
  	int count;
-@@ -482,6 +602,10 @@ static bool compat_filldir(struct dir_context *ctx, const char *name, int namlen
+@@ -482,6 +597,10 @@ static int compat_filldir(struct dir_context *ctx, const char *name, int namlen,
  		namlen + 2, sizeof(compat_long_t));
  	int prev_reclen;
  
@@ -2885,8 +2879,8 @@ index 9c53edb60..5bb548300 100644
 +
  	buf->error = verify_dirent_name(name, namlen);
  	if (unlikely(buf->error))
- 		return false;
-@@ -534,6 +658,10 @@ COMPAT_SYSCALL_DEFINE3(getdents, unsigned int, fd,
+ 		return buf->error;
+@@ -534,6 +653,10 @@ COMPAT_SYSCALL_DEFINE3(getdents, unsigned int, fd,
  	if (!f.file)
  		return -EBADF;
  
@@ -2897,7 +2891,7 @@ index 9c53edb60..5bb548300 100644
  	error = iterate_dir(f.file, &buf.ctx);
  	if (error >= 0)
  		error = buf.error;
-@@ -546,6 +674,9 @@ COMPAT_SYSCALL_DEFINE3(getdents, unsigned int, fd,
+@@ -546,6 +669,9 @@ COMPAT_SYSCALL_DEFINE3(getdents, unsigned int, fd,
  		else
  			error = count - buf.count;
  	}
@@ -2908,21 +2902,20 @@ index 9c53edb60..5bb548300 100644
  	return error;
  }
 diff --git a/fs/stat.c b/fs/stat.c
-index ef50573c7..ef19997de 100644
+index 357a1db41..a9e4dcdca 100644
 --- a/fs/stat.c
 +++ b/fs/stat.c
-@@ -25,6 +25,10 @@
+@@ -23,6 +23,9 @@
+ 
  #include "internal.h"
  #include "mount.h"
- 
 +#ifdef CONFIG_HYMOFS
 +#include <linux/hymofs.h>
 +#endif
-+
+ 
  /**
   * generic_fillattr - Fill in the basic attributes from the inode struct
-  * @mnt_userns:	user namespace of the mount the inode was found from
-@@ -120,11 +124,37 @@ int vfs_getattr_nosec(const struct path *path, struct kstat *stat,
+@@ -119,11 +122,37 @@ int vfs_getattr_nosec(const struct path *path, struct kstat *stat,
  				  STATX_ATTR_DAX);
  
  	mnt_userns = mnt_user_ns(path->mnt);
@@ -2960,9 +2953,9 @@ index ef50573c7..ef19997de 100644
  	return 0;
  }
  EXPORT_SYMBOL(vfs_getattr_nosec);
-@@ -220,6 +250,9 @@ static int vfs_statx(int dfd, struct filename *filename, int flags,
+@@ -205,6 +234,9 @@ static int vfs_statx(int dfd, const char __user *filename, int flags,
  	struct path path;
- 	unsigned int lookup_flags = getname_statx_lookup_flags(flags);
+ 	unsigned lookup_flags = 0;
  	int error;
 +#ifdef CONFIG_HYMOFS
 +	struct filename *hymo_filename = NULL;
@@ -2970,10 +2963,10 @@ index ef50573c7..ef19997de 100644
  
  	if (flags & ~(AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT | AT_EMPTY_PATH |
  		      AT_STATX_SYNC_TYPE))
-@@ -227,6 +260,16 @@ static int vfs_statx(int dfd, struct filename *filename, int flags,
+@@ -219,6 +251,16 @@ static int vfs_statx(int dfd, const char __user *filename, int flags,
  
  retry:
- 	error = filename_lookup(dfd, filename, lookup_flags, &path, NULL);
+ 	error = user_path_at(dfd, filename, lookup_flags, &path);
 +
 +#ifdef CONFIG_HYMOFS_FORWARD_REDIRECT
 +	/* HymoFS: Handle merge directory - relative path + dirfd case */
@@ -2987,7 +2980,7 @@ index ef50573c7..ef19997de 100644
  	if (error)
  		goto out;
  
-@@ -253,6 +296,10 @@ static int vfs_statx(int dfd, struct filename *filename, int flags,
+@@ -234,6 +276,10 @@ static int vfs_statx(int dfd, const char __user *filename, int flags,
  		goto retry;
  	}
  out:
@@ -2999,32 +2992,31 @@ index ef50573c7..ef19997de 100644
  }
  
 diff --git a/fs/xattr.c b/fs/xattr.c
-index 427b8cea1..4a8c66b29 100644
+index c17327f22..5573b4dcb 100644
 --- a/fs/xattr.c
 +++ b/fs/xattr.c
-@@ -27,6 +27,10 @@
+@@ -26,6 +26,9 @@
+ #include <linux/uaccess.h>
  
  #include "internal.h"
- 
 +#ifdef CONFIG_HYMOFS
 +#include <linux/hymofs.h>
 +#endif
-+
+ 
  static const char *
  strcmp_prefix(const char *a, const char *a_prefix)
- {
-@@ -688,6 +692,10 @@ do_getxattr(struct user_namespace *mnt_userns, struct dentry *d,
- {
+@@ -683,6 +686,10 @@ getxattr(struct user_namespace *mnt_userns, struct dentry *d,
  	ssize_t error;
- 	char *kname = ctx->kname->name;
+ 	void *kvalue = NULL;
+ 	char kname[XATTR_NAME_MAX + 1];
 +#ifdef CONFIG_HYMOFS_XATTR_FILTER
 +	if (hymofs_is_overlay_xattr(d, kname))
 +		return -ENODATA;
 +#endif
  
- 	if (ctx->size) {
- 		if (ctx->size > XATTR_SIZE_MAX)
-@@ -793,6 +801,37 @@ listxattr(struct dentry *d, char __user *list, size_t size)
+ 	error = strncpy_from_user(kname, name, sizeof(kname));
+ 	if (error == 0 || error == sizeof(kname))
+@@ -772,6 +779,37 @@ listxattr(struct dentry *d, char __user *list, size_t size)
  	ssize_t error;
  	char *klist = NULL;
  
@@ -3062,7 +3054,7 @@ index 427b8cea1..4a8c66b29 100644
  	if (size) {
  		if (size > XATTR_LIST_MAX)
  			size = XATTR_LIST_MAX;
-@@ -810,6 +849,7 @@ listxattr(struct dentry *d, char __user *list, size_t size)
+@@ -789,6 +827,7 @@ listxattr(struct dentry *d, char __user *list, size_t size)
  		   than XATTR_LIST_MAX bytes. Not possible. */
  		error = -E2BIG;
  	}
@@ -3473,7 +3465,7 @@ index 000000000..5f1dd6321
 +
 +#endif /* _LINUX_HYMOFS_H */
 diff --git a/kernel/reboot.c b/kernel/reboot.c
-index 344ceaf5e..b4f73eb4f 100644
+index 5105f2a46..ec4c10ead 100644
 --- a/kernel/reboot.c
 +++ b/kernel/reboot.c
 @@ -18,6 +18,9 @@
@@ -3486,7 +3478,7 @@ index 344ceaf5e..b4f73eb4f 100644
  
  #include <trace/hooks/reboot.h>
  
-@@ -29,6 +32,12 @@ static int C_A_D = 1;
+@@ -29,6 +32,12 @@ int C_A_D = 1;
  struct pid *cad_pid;
  EXPORT_SYMBOL(cad_pid);
  
@@ -3499,7 +3491,7 @@ index 344ceaf5e..b4f73eb4f 100644
  #if defined(CONFIG_ARM)
  #define DEFAULT_REBOOT_MODE		= REBOOT_HARD
  #else
-@@ -708,6 +717,13 @@ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
+@@ -320,6 +329,13 @@ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
  	char buffer[256];
  	int ret = 0;
  
@@ -3514,10 +3506,10 @@ index 344ceaf5e..b4f73eb4f 100644
  	if (!ns_capable(pid_ns->user_ns, CAP_SYS_BOOT))
  		return -EPERM;
 diff --git a/kernel/sys.c b/kernel/sys.c
-index ba7926d7b..39e60844e 100644
+index 0e7609307..b457e7830 100644
 --- a/kernel/sys.c
 +++ b/kernel/sys.c
-@@ -77,6 +77,9 @@
+@@ -76,6 +76,9 @@
  #include "uid16.h"
  
  #include <trace/hooks/sys.h>
@@ -3527,7 +3519,7 @@ index ba7926d7b..39e60844e 100644
  
  #ifndef SET_UNALIGN_CTL
  # define SET_UNALIGN_CTL(a, b)	(-EINVAL)
-@@ -1305,6 +1308,9 @@ SYSCALL_DEFINE1(newuname, struct new_utsname __user *, name)
+@@ -1298,6 +1301,9 @@ SYSCALL_DEFINE1(newuname, struct new_utsname __user *, name)
  	down_read(&uts_sem);
  	memcpy(&tmp, utsname(), sizeof(tmp));
  	up_read(&uts_sem);
@@ -3537,7 +3529,7 @@ index ba7926d7b..39e60844e 100644
  	if (copy_to_user(name, &tmp, sizeof(tmp)))
  		return -EFAULT;
  
-@@ -1329,6 +1335,9 @@ SYSCALL_DEFINE1(uname, struct old_utsname __user *, name)
+@@ -1322,6 +1328,9 @@ SYSCALL_DEFINE1(uname, struct old_utsname __user *, name)
  	down_read(&uts_sem);
  	memcpy(&tmp, utsname(), sizeof(tmp));
  	up_read(&uts_sem);
