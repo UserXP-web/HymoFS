@@ -191,10 +191,10 @@ index 5f4da5c8d5db..ebc740c700f4 100644
  
 diff --git a/fs/hymofs.c b/fs/hymofs.c
 new file mode 100644
-index 000000000000..5886742d37bf
+index 000000000000..0c4fb35a9cee
 --- /dev/null
 +++ b/fs/hymofs.c
-@@ -0,0 +1,2403 @@
+@@ -0,0 +1,2422 @@
 +#include <linux/string.h>
 +#include <linux/mm.h>
 +#include <linux/file.h>
@@ -689,6 +689,22 @@ index 000000000000..5886742d37bf
 +        return 0;
 +    }
 +
++    if (cmd == HYMO_CMD_SET_UNAME) {
++#ifdef CONFIG_HYMOFS_UNAME_SPOOF
++        struct hymo_uname_info u_info;
++
++        if (copy_from_user(&u_info, arg, sizeof(u_info)))
++            return -EFAULT;
++
++        spin_lock(&hymo_uname_lock);
++        memcpy(&hymo_uname_info, &u_info, sizeof(u_info));
++        spin_unlock(&hymo_uname_lock);
++        return 0;
++#else
++        return -EOPNOTSUPP;
++#endif
++    }
++
 +    if (copy_from_user(&req, arg, sizeof(req))) return -EFAULT;
 +
 +    if (cmd == HYMO_CMD_SET_MIRROR_PATH) {
@@ -1156,6 +1172,8 @@ index 000000000000..5886742d37bf
 +        return hymo_dispatch_cmd(HYMO_CMD_ADD_MERGE_RULE, (void __user *)arg);
 +    case HYMO_IOC_SET_MIRROR_PATH:
 +        return hymo_dispatch_cmd(HYMO_CMD_SET_MIRROR_PATH, (void __user *)arg);
++    case HYMO_IOC_SET_UNAME:
++        return hymo_dispatch_cmd(HYMO_CMD_SET_UNAME, (void __user *)arg);
 +    default:
 +        return -EINVAL;
 +    }
@@ -2465,39 +2483,40 @@ index 000000000000..5886742d37bf
 + * Allows spoofing kernel version reported by uname()
 + */
 +
-+static bool hymo_uname_spoofed = false;
++static struct hymo_uname_info {
++	char sysname[65];
++	char nodename[65];
++	char release[65];
++	char version[65];
++	char machine[65];
++	char domainname[65];
++} hymo_uname_info = { 0 };
 +
-+static struct {
-+    char release[__NEW_UTS_LEN + 1];
-+    char version[__NEW_UTS_LEN + 1];
-+    char machine[__NEW_UTS_LEN + 1];
-+} hymo_uname_data;
++static DEFINE_SPINLOCK(hymo_uname_lock);
 +
 +void hymofs_spoof_uname(struct new_utsname *name)
 +{
-+        
-+    if (!hymo_uname_spoofed)
-+        return;
-+
-+    if (!name)
-+        return;
++	if (!name)
++		return;
 +
 +    /* Root sees real values */
 +    if (uid_eq(current_uid(), GLOBAL_ROOT_UID))
 +        return;
 +
-+    if (hymo_uname_data.release[0] != '\0') {
-+        strncpy(name->release, hymo_uname_data.release, __NEW_UTS_LEN);
-+        name->release[__NEW_UTS_LEN] = '\0';
-+    }
-+    if (hymo_uname_data.version[0] != '\0') {
-+        strncpy(name->version, hymo_uname_data.version, __NEW_UTS_LEN);
-+        name->version[__NEW_UTS_LEN] = '\0';
-+    }
-+    if (hymo_uname_data.machine[0] != '\0') {
-+        strncpy(name->machine, hymo_uname_data.machine, __NEW_UTS_LEN);
-+        name->machine[__NEW_UTS_LEN] = '\0';
-+    }
++	spin_lock(&hymo_uname_lock);
++	if (hymo_uname_info.sysname[0])
++		strscpy(name->sysname, hymo_uname_info.sysname, sizeof(name->sysname));
++	if (hymo_uname_info.nodename[0])
++		strscpy(name->nodename, hymo_uname_info.nodename, sizeof(name->nodename));
++	if (hymo_uname_info.release[0])
++		strscpy(name->release, hymo_uname_info.release, sizeof(name->release));
++	if (hymo_uname_info.version[0])
++		strscpy(name->version, hymo_uname_info.version, sizeof(name->version));
++	if (hymo_uname_info.machine[0])
++		strscpy(name->machine, hymo_uname_info.machine, sizeof(name->machine));
++	if (hymo_uname_info.domainname[0])
++		strscpy(name->domainname, hymo_uname_info.domainname, sizeof(name->domainname));
++	spin_unlock(&hymo_uname_lock);
 +}
 +EXPORT_SYMBOL(hymofs_spoof_uname);
 +#endif /* CONFIG_HYMOFS_UNAME_SPOOF */
@@ -3122,10 +3141,10 @@ index a6eb8cbc7b4c..0e90d43fb57e 100644
  
 diff --git a/include/linux/hymo_magic.h b/include/linux/hymo_magic.h
 new file mode 100644
-index 000000000000..ad1dca1917fd
+index 000000000000..66e1e5a09914
 --- /dev/null
 +++ b/include/linux/hymo_magic.h
-@@ -0,0 +1,125 @@
+@@ -0,0 +1,127 @@
 +#ifndef _LINUX_HYMO_MAGIC_H
 +#define _LINUX_HYMO_MAGIC_H
 +
@@ -3141,9 +3160,7 @@ index 000000000000..ad1dca1917fd
 +
 +#define HYMO_MAGIC1 0x48594D4F // "HYMO"
 +#define HYMO_MAGIC2 0x524F4F54 // "ROOT"
-+#define HYMO_PROTOCOL_VERSION 11
-+#define HYMO_DEVICE_NAME "hymo"
-+#define HYMO_DEVICE_PATH "/dev/hymo"
++#define HYMO_PROTOCOL_VERSION 12
 +
 +#define HYMO_MAX_LEN_PATHNAME 256
 +#define HYMO_FAKE_CMDLINE_SIZE 4096
@@ -3206,8 +3223,12 @@ index 000000000000..ad1dca1917fd
 + */
 +#define HYMO_UNAME_LEN 65
 +struct hymo_spoof_uname {
++    char sysname[HYMO_UNAME_LEN];                       
++    char nodename[HYMO_UNAME_LEN];                      
 +    char release[HYMO_UNAME_LEN];                       /* e.g., "5.15.0-generic" */
 +    char version[HYMO_UNAME_LEN];                       /* e.g., "#1 SMP PREEMPT ..." */
++    char machine[HYMO_UNAME_LEN];                       
++    char domainname[HYMO_UNAME_LEN];                    
 +    int err;
 +};
 +
