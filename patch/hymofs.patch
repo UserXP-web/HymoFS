@@ -191,10 +191,10 @@ index 5f4da5c8d5db..ebc740c700f4 100644
  
 diff --git a/fs/hymofs.c b/fs/hymofs.c
 new file mode 100644
-index 000000000000..f91841a17449
+index 000000000000..5886742d37bf
 --- /dev/null
 +++ b/fs/hymofs.c
-@@ -0,0 +1,2399 @@
+@@ -0,0 +1,2403 @@
 +#include <linux/string.h>
 +#include <linux/mm.h>
 +#include <linux/file.h>
@@ -425,6 +425,17 @@ index 000000000000..f91841a17449
 +    bitmap_zero(hymo_path_bloom, HYMO_BLOOM_SIZE);
 +    atomic_set(&hymo_rule_count, 0);
 +}
++
++/* Forward declaration for ioctl handler */
++static long hymo_anon_ioctl(struct file *file, unsigned int cmd, unsigned long arg);
++
++/* Anonymous file operations for HymoFS fd */
++static const struct file_operations hymo_anon_fops = {
++    .owner          = THIS_MODULE,
++    .unlocked_ioctl = hymo_anon_ioctl,
++    .compat_ioctl   = hymo_anon_ioctl,
++    .llseek         = noop_llseek,
++};
 +
 +static void hymofs_add_inject_rule(char *dir)
 +{
@@ -1149,13 +1160,6 @@ index 000000000000..f91841a17449
 +        return -EINVAL;
 +    }
 +}
-+
-+static const struct file_operations hymo_anon_fops = {
-+    .owner          = THIS_MODULE,
-+    .unlocked_ioctl = hymo_anon_ioctl,
-+    .compat_ioctl   = hymo_anon_ioctl,
-+    .llseek         = noop_llseek,
-+};
 +
 +static int __init hymofs_init(void)
 +{
