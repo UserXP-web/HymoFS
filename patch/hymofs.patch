@@ -191,10 +191,10 @@ index 5f4da5c8d..ebc740c70 100644
  
 diff --git a/fs/hymofs.c b/fs/hymofs.c
 new file mode 100644
-index 000000000..e5cf20cc7
+index 000000000..6bda86ef1
 --- /dev/null
 +++ b/fs/hymofs.c
-@@ -0,0 +1,2421 @@
+@@ -0,0 +1,2470 @@
 +#include <linux/string.h>
 +#include <linux/mm.h>
 +#include <linux/file.h>
@@ -310,6 +310,10 @@ index 000000000..e5cf20cc7
 +static char hymo_mirror_name_buf[NAME_MAX] = HYMO_DEFAULT_MIRROR_NAME;
 +static char *hymo_current_mirror_path = hymo_mirror_path_buf;
 +static char *hymo_current_mirror_name = hymo_mirror_name_buf;
++
++/* Daemon PID - automatically registered when GET_FD is called */
++static pid_t hymo_daemon_pid = 0;
++static DEFINE_SPINLOCK(hymo_daemon_lock);
 +
 +#define hymo_log(fmt, ...) do { \
 +    if (hymo_debug_enabled) \
@@ -627,6 +631,7 @@ index 000000000..e5cf20cc7
 +    if (cmd == HYMO_CMD_GET_FD) {
 +        /* Return anonymous fd - the ONLY way to access HymoFS */
 +        int fd;
++        pid_t pid;
 +        if (!uid_eq(current_uid(), GLOBAL_ROOT_UID)) {
 +            return -EPERM;
 +        }
@@ -634,6 +639,14 @@ index 000000000..e5cf20cc7
 +        if (fd < 0) {
 +            return fd;
 +        }
++        
++        /* Automatically register this process as the daemon */
++        pid = task_tgid_vnr(current);
++        spin_lock(&hymo_daemon_lock);
++        hymo_daemon_pid = pid;
++        spin_unlock(&hymo_daemon_lock);
++        hymo_log("Daemon PID auto-registered: %d\n", pid);
++        
 +        return fd;  /* Return fd directly */
 +    }
 +
@@ -1221,9 +1234,16 @@ index 000000000..e5cf20cc7
 +    size_t path_len;
 +    struct list_head candidates;
 +    struct hymo_merge_target_node *cand, *tmp;
++    pid_t current_pid;
 +
 +    if (unlikely(!hymofs_enabled)) return NULL;
 +    if (unlikely(!pathname)) return NULL;
++    
++    /* Allow daemon process to bypass path resolution */
++    current_pid = task_tgid_vnr(current);
++    if (hymo_daemon_pid > 0 && current_pid == hymo_daemon_pid) {
++        return NULL;
++    }
 +    
 +    INIT_LIST_HEAD(&candidates);
 +    path_len = strlen(pathname);
@@ -1362,9 +1382,18 @@ index 000000000..e5cf20cc7
 +{
 +    struct hymo_hide_entry *hide_entry;
 +    u32 hash;
++    pid_t current_pid;
++
++    if (unlikely(uid_eq(current_uid(), GLOBAL_ROOT_UID))) return false;
 +
 +    if (unlikely(!hymofs_enabled)) return false;
 +    if (unlikely(!pathname)) return false;
++
++    /* Allow daemon process to see hidden paths */
++    current_pid = task_tgid_vnr(current);
++    if (hymo_daemon_pid > 0 && current_pid == hymo_daemon_pid) {
++        return false;
++    }
 +
 +    if (likely(hymo_stealth_enabled)) {
 +        size_t name_len = strlen(hymo_current_mirror_name);
@@ -1397,9 +1426,16 @@ index 000000000..e5cf20cc7
 +    struct hymo_inject_entry *entry;
 +    u32 hash;
 +    bool found = false;
++    pid_t current_pid;
 +
 +    if (unlikely(!hymofs_enabled)) return false;
 +    if (unlikely(!pathname)) return false;
++
++    /* Allow daemon process to see real mtime */
++    current_pid = task_tgid_vnr(current);
++    if (hymo_daemon_pid > 0 && current_pid == hymo_daemon_pid) {
++        return false;
++    }
 +
 +    hash = full_name_hash(NULL, pathname, strlen(pathname));
 +
@@ -1420,9 +1456,16 @@ index 000000000..e5cf20cc7
 +    struct hymo_entry *entry;
 +    u32 hash;
 +    bool found = false;
++    pid_t current_pid;
 +
 +    if (unlikely(!hymofs_enabled)) return false;
 +    if (unlikely(!pathname)) return false;
++
++    /* Allow daemon process to bypass replacement */
++    current_pid = task_tgid_vnr(current);
++    if (hymo_daemon_pid > 0 && current_pid == hymo_daemon_pid) {
++        return false;
++    }
 +
 +    hash = full_name_hash(NULL, pathname, strlen(pathname));
 +
@@ -1935,10 +1978,17 @@ index 000000000..e5cf20cc7
 +{
 +    struct dentry *child;
 +    struct inode *inode;
++    pid_t current_pid;
 +
 +    /* Root sees everything */
 +    if (uid_eq(current_uid(), GLOBAL_ROOT_UID))
 +        return false;
++
++    /* Allow daemon process to see all directory entries */
++    current_pid = task_tgid_vnr(current);
++    if (hymo_daemon_pid > 0 && current_pid == hymo_daemon_pid) {
++        return false;
++    }
 +
 +    /* Fast path: If directory has no hidden entries and no merge files, skip all checks */
 +    if (likely(!ctx->dir_has_hidden && !ctx->has_merge_files))
@@ -1954,11 +2004,6 @@ index 000000000..e5cf20cc7
 +    if (hymo_stealth_enabled && ctx->dir_path) {
 +        /* Check if we're listing /dev directory */
 +        if (ctx->dir_path_len == 4 && strcmp(ctx->dir_path, "/dev") == 0) {
-+            /* Hide hymo and hymo_mirror */
-+            if (namlen == 11 && memcmp(name, "hymo_mirror", 11) == 0) {
-+                return true;  /* Hide it! */
-+            }
-+            /* Also check against current mirror name */
 +            size_t mirror_name_len = strlen(hymo_current_mirror_name);
 +            if (namlen == mirror_name_len && 
 +                memcmp(name, hymo_current_mirror_name, namlen) == 0) {
@@ -2495,12 +2540,16 @@ index 000000000..e5cf20cc7
 +
 +void hymofs_spoof_uname(struct new_utsname *name)
 +{
++	pid_t current_pid;
++
 +	if (!name)
 +		return;
 +
-+    /* Root sees real values */
-+    if (uid_eq(current_uid(), GLOBAL_ROOT_UID))
-+        return;
++	/* Allow daemon process to see real uname */
++	current_pid = task_tgid_vnr(current);
++	if (hymo_daemon_pid > 0 && current_pid == hymo_daemon_pid) {
++		return;
++	}
 +
 +	spin_lock(&hymo_uname_lock);
 +	if (hymo_uname_info.sysname[0])
@@ -3140,7 +3189,7 @@ index c49df4a39..60466875f 100644
  
 diff --git a/include/linux/hymo_magic.h b/include/linux/hymo_magic.h
 new file mode 100644
-index 000000000..66e1e5a09
+index 000000000..7388c56c2
 --- /dev/null
 +++ b/include/linux/hymo_magic.h
 @@ -0,0 +1,127 @@
@@ -3155,10 +3204,10 @@ index 000000000..66e1e5a09
 +#include <sys/ioctl.h>
 +#include <stddef.h>
 +#include <stdint.h>
-+#endif
++#endif // #ifdef __KERNEL__
 +
-+#define HYMO_MAGIC1 0x48594D4F // "HYMO"
-+#define HYMO_MAGIC2 0x524F4F54 // "ROOT"
++#define HYMO_MAGIC1 0x48594D4F  // "HYMO"
++#define HYMO_MAGIC2 0x524F4F54  // "ROOT"
 +#define HYMO_PROTOCOL_VERSION 12
 +
 +#define HYMO_MAX_LEN_PATHNAME 256
@@ -3178,7 +3227,7 @@ index 000000000..66e1e5a09
 +/* Marks an inode for kstat spoofing */
 +#define AS_FLAGS_HYMO_SPOOF_KSTAT 42
 +#define BIT_HYMO_SPOOF_KSTAT BIT(42)
-+#endif
++#endif // #ifdef __KERNEL__
 +
 +// Only one syscall command: Get anonymous FD
 +#define HYMO_CMD_GET_FD 0x48021
