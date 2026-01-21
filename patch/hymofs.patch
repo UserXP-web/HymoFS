@@ -191,10 +191,10 @@ index 5f4da5c8d..ebc740c70 100644
  
 diff --git a/fs/hymofs.c b/fs/hymofs.c
 new file mode 100644
-index 000000000..d7dfd9996
+index 000000000..e5cf20cc7
 --- /dev/null
 +++ b/fs/hymofs.c
-@@ -0,0 +1,2422 @@
+@@ -0,0 +1,2421 @@
 +#include <linux/string.h>
 +#include <linux/mm.h>
 +#include <linux/file.h>
@@ -1936,13 +1936,13 @@ index 000000000..d7dfd9996
 +    struct dentry *child;
 +    struct inode *inode;
 +
-+    /* Fast path: If directory has no hidden entries and no merge files, skip all checks */
-+    if (likely(!ctx->dir_has_hidden && !ctx->has_merge_files))
-+        return false;  /* O(1) skip! */
-+
 +    /* Root sees everything */
 +    if (uid_eq(current_uid(), GLOBAL_ROOT_UID))
 +        return false;
++
++    /* Fast path: If directory has no hidden entries and no merge files, skip all checks */
++    if (likely(!ctx->dir_has_hidden && !ctx->has_merge_files))
++        return false;  /* O(1) skip! */
 +
 +    /* Skip . and .. - use single comparison where possible */
 +    if (unlikely(namlen <= 2 && name[0] == '.')) {
@@ -1955,8 +1955,7 @@ index 000000000..d7dfd9996
 +        /* Check if we're listing /dev directory */
 +        if (ctx->dir_path_len == 4 && strcmp(ctx->dir_path, "/dev") == 0) {
 +            /* Hide hymo and hymo_mirror */
-+            if ((namlen == 4 && memcmp(name, "hymo", 4) == 0) ||
-+                (namlen == 11 && memcmp(name, "hymo_mirror", 11) == 0)) {
++            if (namlen == 11 && memcmp(name, "hymo_mirror", 11) == 0) {
 +                return true;  /* Hide it! */
 +            }
 +            /* Also check against current mirror name */
