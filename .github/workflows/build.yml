@@ -7,12 +7,28 @@ on:
   pull_request:
     branches: ["kpm"]
   workflow_dispatch:
+    inputs:
+      kmi:
+        description: "DDK KMI version (docker tag prefix)"
+        required: false
+        default: "android15-6.6"
+        type: string
+      ddk_release:
+        description: "DDK release version (docker tag suffix)"
+        required: false
+        default: "20251104"
+        type: string
 
 jobs:
   build-kpm:
     name: Build HymoFS KPM
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    container:
+      # Provide a complete kernel build environment + kernel sources/headers.
+      # Refer to YukiSU/.github/workflows/ddk-lkm.yml
+      image: ghcr.io/ylarod/ddk:${{ inputs.kmi || 'android15-6.6' }}-${{ inputs.ddk_release || '20251104' }}
+      options: --privileged
     permissions:
       contents: write
     steps:
@@ -21,19 +37,47 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Setup Android SDK + NDK
-        uses: android-actions/setup-android@v3
-        with:
-          packages: ndk;29.0.14206865
-
       - name: Build (release + debug)
-        env:
-          ANDROID_NDK: ${{ env.ANDROID_SDK_ROOT }}/ndk/29.0.14206865
         run: |
           set -euxo pipefail
+          # GitHub checkout inside container needs this sometimes.
+          git config --global --add safe.directory /__w/HymoFS/HymoFS || true
+
+          # Detect kernel source directory provided by DDK image.
+          KERNEL_SRC=""
+          for d in \
+            "/kernel" \
+            "/android/kernel" \
+            "/usr/src/kernel" \
+            "/usr/src/android-kernel" \
+            "/opt/kernel" \
+            "/work/kernel" \
+            "/ddk/kernel" \
+            "/src/kernel" \
+            "/common" \
+            "/android15-6.6/common" \
+            ; do
+            if [ -f "$d/Makefile" ] && [ -f "$d/include/linux/kconfig.h" ]; then
+              KERNEL_SRC="$d"
+              break
+            fi
+          done
+          if [ -z "$KERNEL_SRC" ]; then
+            echo "ERROR: cannot locate kernel source in container image."
+            echo "Hint: update the candidate list in .github/workflows/build.yml"
+            exit 1
+          fi
+          echo "Using KERNEL_SRC=$KERNEL_SRC"
+
           make -C hymofs_kpm clean
-          make -C hymofs_kpm
-          make -C hymofs_kpm debug || true
+          # Build with toolchain provided by the container image.
+          # We override CC/LD/OBJCOPY to avoid relying on Android NDK layout.
+          make -C hymofs_kpm \
+            KERNEL_SRC="$KERNEL_SRC" \
+            CC=clang LD=ld.lld OBJCOPY=llvm-objcopy
+          make -C hymofs_kpm debug \
+            KERNEL_SRC="$KERNEL_SRC" \
+            CC=clang LD=ld.lld OBJCOPY=llvm-objcopy || true
           ls -lah ./hymofs_*.kpm
 
       - name: Import GPG key
@@ -41,6 +85,8 @@ jobs:
           GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
         run: |
           set -euo pipefail
+          # DDK images may not include gpg by default.
+          (command -v gpg >/dev/null 2>&1) || (apt-get update && apt-get install -y gnupg)
           if [ -n "${GPG_PRIVATE_KEY:-}" ]; then
             echo "$GPG_PRIVATE_KEY" | gpg --batch --import
             echo "allow-loopback-pinentry" >> ~/.gnupg/gpg-agent.conf
@@ -94,6 +140,7 @@ jobs:
           python3 -m pip install --upgrade pip
           # pick first (release) kpm; if missing, fallback to any
           KPM_FILE="$(ls -1 hymofs_*.kpm | head -n1)"
+          SIG_FILE="${KPM_FILE}.sig"
           if [ ! -f "$KPM_FILE" ] || [ ! -f "$SIG_FILE" ]; then
             echo "Missing kpm/sig, skipping."
             exit 0
