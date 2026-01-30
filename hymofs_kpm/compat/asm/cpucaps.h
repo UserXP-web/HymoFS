@@ -1,0 +1,6 @@
+#ifndef _COMPAT_ASM_CPUCAPS_H
+#define _COMPAT_ASM_CPUCAPS_H
+
+#define ARM64_NCAPS 0
+
+#endif /* _COMPAT_ASM_CPUCAPS_H */

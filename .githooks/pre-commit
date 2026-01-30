@@ -1,53 +1,58 @@
 #!/bin/bash
-# Pre-commit hook for HymoFS repository
-# Automatically generates patch from kernel submodule before commit
+# Pre-commit hook for Hymofs Kpm
+# Automatically formats C/C++ code and adds #endif comments
 
 set -e
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
-KERNEL_REPO="$REPO_ROOT/patch_workspace/android15-6.6/common"
-PATCH_DIR="$REPO_ROOT/patch"
 
-# Branch names (customize as needed)
-ORIGIN_BRANCH="android15-6.6"
-MODIFIED_BRANCH="hymofs-modified"
+# Get list of staged C/C++/H files
+STAGED_C_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.(c|h)$' | grep -v tools/ || true)
+STAGED_CPP_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.(cpp|hpp)$' || true)
 
-# Check if kernel repo exists
-if [ ! -d "$KERNEL_REPO/.git" ]; then
-    echo "[pre-commit] Kernel repo not found, skipping patch generation"
-    exit 0
-fi
-
-echo "[pre-commit] Generating patch from kernel modifications..."
-
-cd "$KERNEL_REPO"
-
-# Check if branches exist
-if ! git rev-parse --verify "$ORIGIN_BRANCH" >/dev/null 2>&1; then
-    echo "[pre-commit] Origin branch '$ORIGIN_BRANCH' not found, skipping"
-    exit 0
-fi
-
-if ! git rev-parse --verify "$MODIFIED_BRANCH" >/dev/null 2>&1; then
-    echo "[pre-commit] Modified branch '$MODIFIED_BRANCH' not found, skipping"
-    exit 0
-fi
-
-# Generate patch
-PATCH_FILE="$PATCH_DIR/hymofs.patch"
-git diff "$ORIGIN_BRANCH".."$MODIFIED_BRANCH" > "$PATCH_FILE"
-
-# Check if patch changed
-cd "$REPO_ROOT"
-if  git diff --quiet "$PATCH_FILE" 2>/dev/null; then
-    echo "[pre-commit] Patch unchanged"
-else
-    echo "[pre-commit] Patch updated, staging..."
-    git add "$PATCH_FILE"
+if [ -n "$STAGED_C_FILES" ] || [ -n "$STAGED_CPP_FILES" ]; then
+    echo "[pre-commit] Formatting staged C/C++ files..."
     
-    # Show stats
-    STATS=$(cd "$KERNEL_REPO" && git diff --stat "$ORIGIN_BRANCH".."$MODIFIED_BRANCH" | tail -1)
-    echo "[pre-commit] $STATS"
+    # Format kernel C files
+    if [ -n "$STAGED_C_FILES" ]; then
+        for file in $STAGED_C_FILES; do
+            if [ -f "$REPO_ROOT/$file" ]; then
+                echo "  Formatting: $file"
+                clang-format -i "$REPO_ROOT/$file"
+            fi
+        done
+    fi
+    
+    # Format userspace C++ files
+    if [ -n "$STAGED_CPP_FILES" ]; then
+        for file in $STAGED_CPP_FILES; do
+            if [ -f "$REPO_ROOT/$file" ]; then
+                echo "  Formatting: $file"
+                clang-format -i "$REPO_ROOT/$file"
+            fi
+        done
+    fi
+    
+    # Add #endif comments using Python script
+    ENDIF_SCRIPT="$REPO_ROOT/.githooks/fix_endif_comments.py"
+    if [ -f "$ENDIF_SCRIPT" ]; then
+        echo "[pre-commit] Adding #endif comments..."
+        ALL_FILES="$STAGED_C_FILES $STAGED_CPP_FILES"
+        for file in $ALL_FILES; do
+            if [ -f "$REPO_ROOT/$file" ]; then
+                python3 "$ENDIF_SCRIPT" "$REPO_ROOT/$file"
+            fi
+        done
+    fi
+    
+    # Re-add formatted files to staging
+    for file in $STAGED_C_FILES $STAGED_CPP_FILES; do
+        if [ -f "$REPO_ROOT/$file" ]; then
+            git add "$REPO_ROOT/$file"
+        fi
+    done
+    
+    echo "[pre-commit] Done!"
 fi
 
-echo "[pre-commit] Done!"
+exit 0

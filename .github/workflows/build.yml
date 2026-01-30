@@ -1,0 +1,113 @@
+name: Build HymoFS KPM
+
+on:
+  push:
+    branches: ["kpm"]
+    tags: ["*"]
+  pull_request:
+    branches: ["kpm"]
+  workflow_dispatch:
+
+jobs:
+  build-kpm:
+    name: Build HymoFS KPM
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Android SDK + NDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: ndk;29.0.14206865
+
+      - name: Build (release + debug)
+        env:
+          ANDROID_NDK: ${{ env.ANDROID_SDK_ROOT }}/ndk/29.0.14206865
+        run: |
+          set -euxo pipefail
+          make -C hymofs_kpm clean
+          make -C hymofs_kpm
+          make -C hymofs_kpm debug || true
+          ls -lah ./hymofs_*.kpm
+
+      - name: Import GPG key
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -n "${GPG_PRIVATE_KEY:-}" ]; then
+            echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+            echo "allow-loopback-pinentry" >> ~/.gnupg/gpg-agent.conf
+            gpgconf --kill gpg-agent
+          fi
+
+      - name: GPG sign KPMs
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          GPG_FINGERPRINT: ${{ secrets.GPG_FINGERPRINT }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GPG_PRIVATE_KEY:-}" ]; then
+            echo "GPG_PRIVATE_KEY not set, skipping."
+            exit 0
+          fi
+          KEY_ARG=""
+          if [ -n "${GPG_FINGERPRINT:-}" ]; then
+            KEY_ARG="--local-user ${GPG_FINGERPRINT}"
+          fi
+          for f in hymofs_*.kpm; do
+            [ -f "$f" ] || continue
+            gpg --batch --yes --pinentry-mode loopback --passphrase "${GPG_PASSPHRASE:-}" $KEY_ARG --detach-sign "$f"
+          done
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: hymofs-kpm-${{ github.sha }}
+          if-no-files-found: error
+          path: |
+            hymofs_*.kpm
+            hymofs_*.kpm.sig
+
+      - name: Post to Telegram
+        if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && github.ref_type != 'tag' }}
+        env:
+          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          MESSAGE_THREAD_ID: ${{ secrets.MESSAGE_THREAD_ID }}
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+          COMMIT_URL: ${{ github.event.head_commit.url }}
+          COMMIT_ID: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BOT_TOKEN:-}" ] || [ -z "${CHAT_ID:-}" ]; then
+            echo "BOT_TOKEN/CHAT_ID not set, skipping."
+            exit 0
+          fi
+          python3 -m pip install --upgrade pip
+          # pick first (release) kpm; if missing, fallback to any
+          KPM_FILE="$(ls -1 hymofs_*.kpm | head -n1)"
+          if [ ! -f "$KPM_FILE" ] || [ ! -f "$SIG_FILE" ]; then
+            echo "Missing kpm/sig, skipping."
+            exit 0
+          fi
+          URL="$(python3 .github/scripts/telegram_url.py "$CHAT_ID")"
+          curl -fsSL -X POST "$URL" \
+            -F "Release1=@${KPM_FILE}"
+
+      - name: Release artifacts (tag)
+        if: ${{ github.ref_type == 'tag' }}
+        uses: ncipollo/release-action@v1
+        with:
+          token: ${{ github.token }}
+          artifacts: hymofs_*.kpm,hymofs_*.kpm.sig
+          generateReleaseNotes: true
+          makeLatest: true
+          replacesArtifacts: true
