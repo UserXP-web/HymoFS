@@ -32,6 +32,7 @@ else ifdef NDK_PATH
 endif
 
 OBJCOPY ?= objcopy
+LD ?= ld.lld
 STRIP_SECTIONS = \
 	--remove-section=.eh_frame \
 	--remove-section=.rela.eh_frame \
@@ -188,12 +189,12 @@ s0_noreboot:
 
 $(OUT_KPM): ${objs}
 	@mkdir -p "$(OUT_DIR)"
-	${CC} -r -o "$@" $^
+	${LD} -r -o "$@" $^
 	${OBJCOPY} $(STRIP_SECTIONS) "$@"
 
 $(OUT_KPM_DEBUG): ${objs}
 	@mkdir -p "$(OUT_DIR)"
-	${CC} -r -o "$@" $^
+	${LD} -r -o "$@" $^
 	${OBJCOPY} $(STRIP_SECTIONS) "$@"
 
 %.o: %.c
