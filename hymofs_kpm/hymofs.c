@@ -1441,6 +1441,9 @@ static void hymo_reload_ksu_allowlist(void) {
 
   if (hymo_safe_mode)
     return;
+  /* Avoid blocking I/O during early boot. */
+  if (hymo_system_state() < SYSTEM_RUNNING)
+    return;
   if (!hymo_sym_valid(hymo_sym_mutex_lock) ||
       !hymo_sym_valid(hymo_sym_mutex_unlock) ||
       !hymo_sym_valid(hymo_sym_filp_open) ||
@@ -3740,7 +3743,7 @@ static ssize_t hymofs_filter_dirents(struct hymo_readdir_context *ctx,
 static void hymofs_getdents_before(hook_fargs3_t *args, void *udata) {
 #ifdef CONFIG_HYMOFS_HIDE_ENTRIES
   unsigned int fd = (unsigned int)args->arg0;
-  struct file *file = fget(fd);
+  struct file *file;
   struct hymo_readdir_context *ctx;
 
   args->local.data0 = 0;
@@ -3753,9 +3756,12 @@ static void hymofs_getdents_before(hook_fargs3_t *args, void *udata) {
    */
   if (!hymofs_enabled || hymofs_exiting || hymo_safe_mode)
     return;
+  if (hymo_system_state() < SYSTEM_RUNNING)
+    return;
   if (likely(!hymofs_has_any_rules()))
     return;
 
+  file = fget(fd);
   if (!file) {
     args->ret = -EBADF;
     args->skip_origin = 1;
@@ -3848,7 +3854,7 @@ out:
 static void hymofs_getdents64_before(hook_fargs3_t *args, void *udata) {
 #ifdef CONFIG_HYMOFS_HIDE_ENTRIES
   unsigned int fd = (unsigned int)args->arg0;
-  struct file *file = fget(fd);
+  struct file *file;
   struct hymo_readdir_context *ctx;
 
   args->local.data0 = 0;
@@ -3857,9 +3863,12 @@ static void hymofs_getdents64_before(hook_fargs3_t *args, void *udata) {
   /* Same fast-path policy as hymofs_getdents_before() */
   if (!hymofs_enabled || hymofs_exiting || hymo_safe_mode)
     return;
+  if (hymo_system_state() < SYSTEM_RUNNING)
+    return;
   if (likely(!hymofs_has_any_rules()))
     return;
 
+  file = fget(fd);
   if (!file) {
     args->ret = -EBADF;
     args->skip_origin = 1;
