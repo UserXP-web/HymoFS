@@ -73,21 +73,42 @@ jobs:
           if [ -z "$KERNEL_SRC" ]; then
             echo "WARN: cannot locate kernel source in container image."
             echo "pwd=$PWD"
-            echo "Proceeding without KERNEL_SRC (use KernelPatch bundled headers)."
-            KERNEL_ARG=""
-          else
-            echo "Using KERNEL_SRC=$KERNEL_SRC"
-            KERNEL_ARG="KERNEL_SRC=$KERNEL_SRC"
+            echo "Attempting to fetch Android common kernel sources for ${KMI}..."
+
+            # Place sources under patch_workspace/<kmi>/common to match local dev layout.
+            mkdir -p "$PWD/patch_workspace/${KMI}"
+
+            # Prefer the exact KMI branch; fallback to -lts if needed.
+            if ! git clone --depth 1 --single-branch --branch "${KMI}" \
+              https://android.googlesource.com/kernel/common \
+              "$PWD/patch_workspace/${KMI}/common"; then
+              echo "WARN: clone branch ${KMI} failed, trying ${KMI}-lts"
+              rm -rf "$PWD/patch_workspace/${KMI}/common"
+              git clone --depth 1 --single-branch --branch "${KMI}-lts" \
+                https://android.googlesource.com/kernel/common \
+                "$PWD/patch_workspace/${KMI}/common"
+            fi
+
+            KERNEL_SRC="$PWD/patch_workspace/${KMI}/common"
           fi
+
+          if [ ! -f "$KERNEL_SRC/Makefile" ] || [ ! -f "$KERNEL_SRC/include/linux/kconfig.h" ]; then
+            echo "ERROR: KERNEL_SRC is still invalid: $KERNEL_SRC"
+            echo "Hint: ensure the DDK image includes kernel sources, or allow CI to clone:"
+            echo "  - https://android.googlesource.com/kernel/common (branch ${KMI})"
+            exit 1
+          fi
+
+          echo "Using KERNEL_SRC=$KERNEL_SRC"
 
           make -C hymofs_kpm clean || true
           # Build with toolchain provided by the container image.
           # We override CC/LD/OBJCOPY to avoid relying on Android NDK layout.
           make -C hymofs_kpm \
-            $KERNEL_ARG \
+            KERNEL_SRC="$KERNEL_SRC" \
             CC=clang LD=ld.lld OBJCOPY=llvm-objcopy
           make -C hymofs_kpm debug \
-            $KERNEL_ARG \
+            KERNEL_SRC="$KERNEL_SRC" \
             CC=clang LD=ld.lld OBJCOPY=llvm-objcopy || true
           ls -lah ./hymofs_*.kpm
 
