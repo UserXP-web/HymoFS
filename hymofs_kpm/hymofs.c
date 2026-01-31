@@ -3209,7 +3209,8 @@ static void hymofs_d_path_after(hook_fargs3_t *args, void *udata) {
   char *res = (char *)args->ret;
   char *buf = (char *)args->arg1;
   int buflen = (int)args->arg2;
-  if (!hymofs_enabled || likely(!hymofs_has_any_rules()))
+  if (!hymofs_enabled || hymofs_exiting || hymo_safe_mode ||
+      likely(!hymofs_has_any_rules()))
     return;
   if (likely(hymo_dpath_enter())) {
     if (res && !IS_ERR(res) && buf)
@@ -3230,7 +3231,7 @@ static void hymofs_getname_after(hook_fargs1_t *args, void *udata) {
    * overhead here can cause visible UI stalls ("卡一屏") when enabling the
    * meta module with empty rule sets.
    */
-  if (unlikely(!hymofs_enabled))
+  if (unlikely(!hymofs_enabled || hymofs_exiting || hymo_safe_mode))
     return;
   if (likely(!hymofs_has_any_rules()))
     return;
@@ -3247,7 +3248,7 @@ static void hymofs_getname_uflags_after(hook_fargs2_t *args, void *udata) {
   struct filename *res = (struct filename *)args->ret;
   if (!res)
     return;
-  if (unlikely(!hymofs_enabled))
+  if (unlikely(!hymofs_enabled || hymofs_exiting || hymo_safe_mode))
     return;
   if (likely(!hymofs_has_any_rules()))
     return;
@@ -3745,6 +3746,16 @@ static void hymofs_getdents_before(hook_fargs3_t *args, void *udata) {
   args->local.data0 = 0;
   args->local.data1 = 0;
 
+  /*
+   * getdents is hot during boot (init, vold, zygote scanning /proc and /).
+   * Keep behavior consistent with getname/d_path: if disabled/safe/no rules,
+   * do nothing and let origin run untouched.
+   */
+  if (!hymofs_enabled || hymofs_exiting || hymo_safe_mode)
+    return;
+  if (likely(!hymofs_has_any_rules()))
+    return;
+
   if (!file) {
     args->ret = -EBADF;
     args->skip_origin = 1;
@@ -3842,6 +3853,12 @@ static void hymofs_getdents64_before(hook_fargs3_t *args, void *udata) {
 
   args->local.data0 = 0;
   args->local.data1 = 0;
+
+  /* Same fast-path policy as hymofs_getdents_before() */
+  if (!hymofs_enabled || hymofs_exiting || hymo_safe_mode)
+    return;
+  if (likely(!hymofs_has_any_rules()))
+    return;
 
   if (!file) {
     args->ret = -EBADF;

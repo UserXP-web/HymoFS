@@ -44,8 +44,16 @@ jobs:
           git config --global --add safe.directory /__w/HymoFS/HymoFS || true
 
           # Detect kernel source directory provided by DDK image.
+          # Note: some setups keep kernel sources under the checked-out workspace
+          # (e.g. patch_workspace/<kmi>/common). So search both container-global
+          # locations and workspace-relative locations.
+          KMI="${{ inputs.kmi || 'android15-6.6' }}"
           KERNEL_SRC=""
           for d in \
+            "$PWD/patch_workspace/${KMI}/common" \
+            "$PWD/patch_workspace/${KMI}" \
+            "$PWD/${KMI}/common" \
+            "$PWD/common" \
             "/kernel" \
             "/android/kernel" \
             "/usr/src/kernel" \
@@ -55,7 +63,7 @@ jobs:
             "/ddk/kernel" \
             "/src/kernel" \
             "/common" \
-            "/android15-6.6/common" \
+            "/${KMI}/common" \
             ; do
             if [ -f "$d/Makefile" ] && [ -f "$d/include/linux/kconfig.h" ]; then
               KERNEL_SRC="$d"
@@ -64,7 +72,11 @@ jobs:
           done
           if [ -z "$KERNEL_SRC" ]; then
             echo "ERROR: cannot locate kernel source in container image."
-            echo "Hint: update the candidate list in .github/workflows/build.yml"
+            echo "pwd=$PWD"
+            echo "Hint: ensure kernel sources/headers are available, e.g.:"
+            echo "  - $PWD/patch_workspace/${KMI}/common"
+            echo "  - /${KMI}/common"
+            echo "Or update the candidate list in .github/workflows/build.yml"
             exit 1
           fi
           echo "Using KERNEL_SRC=$KERNEL_SRC"
