@@ -21,7 +21,7 @@
 #define CONFIG_HYMOFS_HIDE_ENTRIES 1
 #endif // #ifndef CONFIG_HYMOFS_HIDE_ENTRIES
 #ifndef CONFIG_HYMOFS_INJECT_ENTRIES
-#define CONFIG_HYMOFS_INJECT_ENTRIES 1
+#define CONFIG_HYMOFS_INJECT_ENTRIES 0
 #endif // #ifndef CONFIG_HYMOFS_INJECT_ENTRIES
 #ifndef CONFIG_HYMOFS_STAT_SPOOF
 #define CONFIG_HYMOFS_STAT_SPOOF 1
@@ -118,13 +118,6 @@ bool __hymofs_check_filldir(struct hymo_readdir_context *ctx, const char *name,
                             int namlen);
 #endif // #ifdef CONFIG_HYMOFS_HIDE_ENTRIES
 
-#ifdef CONFIG_HYMOFS_INJECT_ENTRIES
-int hymofs_inject_entries(struct hymo_readdir_context *ctx,
-                          void __user **dir_ptr, int *count, loff_t *pos);
-int hymofs_inject_entries64(struct hymo_readdir_context *ctx,
-                            void __user **dir_ptr, int *count, loff_t *pos);
-#endif // #ifdef CONFIG_HYMOFS_INJECT_ENTRIES
-
 /* ========== Stat spoofing ========== */
 #ifdef CONFIG_HYMOFS_STAT_SPOOF
 void hymofs_spoof_stat(const struct path *path, struct kstat *stat);
@@ -184,9 +177,6 @@ char *hymofs_process_d_path(char *res, char *buf, int buflen);
 /* ========== Path hiding ========== */
 #ifdef CONFIG_HYMOFS_HIDE_ENTRIES
 bool __hymofs_should_hide(const char *pathname, size_t len);
-bool __hymofs_should_spoof_mtime(const char *pathname);
-int hymofs_populate_injected_list(const char *dir_path, struct dentry *parent,
-                                  struct list_head *head);
 bool __hymofs_is_inode_hidden(struct inode *inode);
 #endif // #ifdef CONFIG_HYMOFS_HIDE_ENTRIES
 
@@ -279,16 +269,6 @@ static inline bool hymofs_should_hide(const char *pathname) {
 #endif // #ifdef CONFIG_HYMOFS_HIDE_ENTRIES
 }
 
-static inline bool hymofs_should_spoof_mtime(const char *pathname) {
-#ifdef CONFIG_HYMOFS_HIDE_ENTRIES
-  if (!hymofs_enabled)
-    return false;
-  return __hymofs_should_spoof_mtime(pathname);
-#else
-  return false;
-#endif // #ifdef CONFIG_HYMOFS_HIDE_ENTRIES
-}
-
 #else
 
 /* ========== CONFIG_HYMOFS disabled - all stubs ========== */
@@ -299,16 +279,6 @@ static inline void hymofs_cleanup_readdir(struct hymo_readdir_context *ctx) {}
 static inline bool hymofs_check_filldir(struct hymo_readdir_context *ctx,
                                         const char *name, int namlen) {
   return false;
-}
-static inline int hymofs_inject_entries(struct hymo_readdir_context *ctx,
-                                        void __user **dir_ptr, int *count,
-                                        loff_t *pos) {
-  return 0;
-}
-static inline int hymofs_inject_entries64(struct hymo_readdir_context *ctx,
-                                          void __user **dir_ptr, int *count,
-                                          loff_t *pos) {
-  return 0;
 }
 static inline void hymofs_spoof_stat(const struct path *path,
                                      struct kstat *stat) {}
@@ -333,14 +303,6 @@ static inline int hymofs_reverse_lookup(const char *pathname, char *buf,
   return -1;
 }
 static inline bool hymofs_should_hide(const char *pathname) { return false; }
-static inline bool hymofs_should_spoof_mtime(const char *pathname) {
-  return false;
-}
-static inline int hymofs_populate_injected_list(const char *dir_path,
-                                                struct dentry *parent,
-                                                struct list_head *head) {
-  return 0;
-}
 static inline bool hymofs_is_inode_hidden(struct inode *inode) { return false; }
 static inline void hymofs_spoof_kstat_by_ino(unsigned long ino,
                                              struct kstat *stat) {}
