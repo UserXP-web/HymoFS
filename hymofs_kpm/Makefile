@@ -1,4 +1,4 @@
-MYKPM_VERSION := v0.0.1
+MYKPM_VERSION := v0.0.8
 
 ifndef KP_DIR
     KP_DIR = ../KernelPatch
@@ -158,6 +158,12 @@ s2ndngna: s2_nodirents_nogetname_nogetattr
 s2ndngnpna: s2_nodirents_nogetname_nodpath_nogetattr
 s2ndngnf: s2_nodirents_nogetname_nofilename
 
+# Stage2 extra bisect targets:
+# - s2ng: keep dirents enabled but disable getname (to isolate dirents)
+.PHONY: s2ng
+s2ng:
+	$(MAKE) FLAVOR=s2ng HYMOFS_HOOK_STAGE=2 HYMOFS_DISABLE_GETNAME=1 HYMOFS_DISABLE_DIRENTS=0 build
+
 # Higher stages (more stealth hooks)
 .PHONY: s3 s4 s5 s3ndng s4ndng s5ndng s5ndngdp
 s3:
@@ -206,9 +212,10 @@ $(OUT_KPM_DEBUG): ${objs}
 .PHONY: clean
 clean:
 	rm -f "$(OUT_KPM)" "$(OUT_KPM_DEBUG)"
-	find . -name "*.o" | xargs rm -f
+	# Keep clean deterministic and portable (avoid find|xargs quirks).
+	rm -f ./*.o
 
 .PHONY: cleanall
 cleanall:
 	rm -f "$(OUT_DIR)"/hymofs_*.kpm "$(OUT_DIR)"/hymofs_*.kpm.sig "$(OUT_DIR)"/hymofs_*.kpm.asc
-	find . -name "*.o" | xargs rm -f
+	rm -f ./*.o

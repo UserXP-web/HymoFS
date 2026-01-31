@@ -1312,6 +1312,10 @@ static void hymofs_getdents_before(hook_fargs3_t *args, void *udata);
 static void hymofs_getdents_after(hook_fargs3_t *args, void *udata);
 static void hymofs_getdents64_before(hook_fargs3_t *args, void *udata);
 static void hymofs_getdents64_after(hook_fargs3_t *args, void *udata);
+static void hymofs_getdents_regs_before(hook_fargs1_t *args, void *udata);
+static void hymofs_getdents_regs_after(hook_fargs1_t *args, void *udata);
+static void hymofs_getdents64_regs_before(hook_fargs1_t *args, void *udata);
+static void hymofs_getdents64_regs_after(hook_fargs1_t *args, void *udata);
 static void hymofs_filename_lookup_before(hook_fargs5_t *args, void *udata);
 static void hymofs_filename_lookup_after(hook_fargs5_t *args, void *udata);
 static void hymofs_cmdline_show_before(hook_fargs2_t *args, void *udata);
@@ -2713,7 +2717,7 @@ void __hymofs_prepare_readdir(struct hymo_readdir_context *ctx,
   if (!file)
     return;
 
-  ctx->path_buf = (char *)__get_free_page(GFP_KERNEL);
+  ctx->path_buf = (char *)__get_free_page(GFP_NOFS);
   if (!ctx->path_buf)
     return;
 
@@ -3163,6 +3167,13 @@ static long (*k_sys_getdents)(unsigned int fd,
 static long (*k_sys_getdents64)(unsigned int fd,
                                 struct linux_dirent64 __user *dirent,
                                 unsigned int count);
+/* If the resolved syscall symbol is __arm64_sys_* (syscall wrapper), it takes
+ * pt_regs*. */
+static bool hymo_getdents_use_regs = false;
+static bool hymo_getdents64_use_regs = false;
+/* Matched symbol name (for debugging / policy decisions). */
+static const char *hymo_getdents_sym_name = NULL;
+static const char *hymo_getdents64_sym_name = NULL;
 static long (*k_sys_newuname)(struct new_utsname __user *name);
 static long (*k_sys_uname)(struct old_utsname __user *name);
 static int (*k_cmdline_proc_show)(struct seq_file *m, void *v);
@@ -3238,6 +3249,8 @@ static void hymofs_getname_after(hook_fargs1_t *args, void *udata) {
     return;
   if (likely(!hymofs_has_any_rules()))
     return;
+  if (hymo_system_state() < SYSTEM_RUNNING)
+    return;
 
   if (likely(hymofs_getname_guard_enter())) {
     args->ret = (uint64_t)hymofs_handle_getname(res);
@@ -3254,6 +3267,8 @@ static void hymofs_getname_uflags_after(hook_fargs2_t *args, void *udata) {
   if (unlikely(!hymofs_enabled || hymofs_exiting || hymo_safe_mode))
     return;
   if (likely(!hymofs_has_any_rules()))
+    return;
+  if (hymo_system_state() < SYSTEM_RUNNING)
     return;
 
   if (likely(hymofs_getname_guard_enter())) {
@@ -3470,6 +3485,145 @@ static void hymofs_set_xattr_hooks(bool enable) {
   hymo_xattr_hooked = false;
 }
 
+/* === Route A: File Operations Hooking === */
+
+static int (*k_vfs_open)(const struct path *path, struct file *file);
+
+struct hymo_fops_proxy {
+  struct list_head list;
+  const struct file_operations *orig_fops;
+  struct file_operations proxy_fops;
+};
+
+static LIST_HEAD(hymo_fops_proxies);
+static DEFINE_SPINLOCK(hymo_fops_lock);
+
+struct hymo_dir_context_wrapper {
+  struct dir_context ctx;
+  struct dir_context *orig_ctx;
+  struct hymo_readdir_context *hymo_ctx;
+};
+
+static bool hymo_filldir_hook(struct dir_context *ctx, const char *name,
+                              int namlen, loff_t offset, u64 ino,
+                              unsigned int d_type) {
+  struct hymo_dir_context_wrapper *wrapper =
+      container_of(ctx, struct hymo_dir_context_wrapper, ctx);
+
+  if (__hymofs_check_filldir(wrapper->hymo_ctx, name, namlen))
+    return true;
+
+  return wrapper->orig_ctx->actor(wrapper->orig_ctx, name, namlen, offset, ino,
+                                  d_type);
+}
+
+static struct hymo_fops_proxy *
+hymo_get_fops_proxy(const struct file_operations *orig) {
+  struct hymo_fops_proxy *proxy;
+
+  spin_lock(&hymo_fops_lock);
+  list_for_each_entry(proxy, &hymo_fops_proxies, list) {
+    if (proxy->orig_fops == orig) {
+      spin_unlock(&hymo_fops_lock);
+      return proxy;
+    }
+  }
+  spin_unlock(&hymo_fops_lock);
+  return NULL;
+}
+
+static int hymo_iterate_shared_proxy(struct file *file,
+                                     struct dir_context *ctx) {
+  struct hymo_fops_proxy *proxy;
+  struct hymo_dir_context_wrapper wrapper;
+  struct hymo_readdir_context hymo_ctx;
+  int ret;
+
+  proxy = container_of(file->f_op, struct hymo_fops_proxy, proxy_fops);
+
+  if (!hymofs_enabled || hymofs_exiting || hymo_safe_mode ||
+      !hymofs_has_any_rules())
+    return proxy->orig_fops->iterate_shared(file, ctx);
+
+  memset(&hymo_ctx, 0, sizeof(hymo_ctx));
+  hymo_ctx.magic = HYMO_CTX_MAGIC;
+  hymo_ctx.file = file;
+  hymofs_prepare_readdir(&hymo_ctx, file);
+
+  wrapper.ctx.actor = hymo_filldir_hook;
+  wrapper.ctx.pos = ctx->pos;
+  wrapper.orig_ctx = ctx;
+  wrapper.hymo_ctx = &hymo_ctx;
+
+  ret = proxy->orig_fops->iterate_shared(file, &wrapper.ctx);
+
+  ctx->pos = wrapper.ctx.pos;
+  hymofs_cleanup_readdir(&hymo_ctx);
+  return ret;
+}
+
+static struct hymo_fops_proxy *
+hymo_create_fops_proxy(const struct file_operations *orig) {
+  struct hymo_fops_proxy *proxy;
+
+  proxy = kzalloc(sizeof(*proxy), GFP_KERNEL);
+  if (!proxy)
+    return NULL;
+
+  proxy->orig_fops = orig;
+  memcpy(&proxy->proxy_fops, orig, sizeof(*orig));
+
+  if (orig->iterate_shared)
+    proxy->proxy_fops.iterate_shared = hymo_iterate_shared_proxy;
+  /* If iterate is deprecated, we don't hook it. */
+
+  spin_lock(&hymo_fops_lock);
+  list_add(&proxy->list, &hymo_fops_proxies);
+  spin_unlock(&hymo_fops_lock);
+
+  return proxy;
+}
+
+static void hymofs_vfs_open_after(hook_fargs2_t *args, void *udata) {
+  struct file *file;
+  struct hymo_fops_proxy *proxy;
+  const struct file_operations *orig_fops;
+
+  /* Check return value of vfs_open */
+  if (args->ret != 0)
+    return;
+
+  if (!hymofs_enabled || hymofs_exiting || hymo_safe_mode)
+    return;
+
+  file = (struct file *)args->arg1;
+  if (!file || !file->f_op)
+    return;
+
+  /* Only hook directories */
+  if (!S_ISDIR(file_inode(file)->i_mode))
+    return;
+
+  /* Check if already hooked */
+  if (file->f_op->iterate_shared == hymo_iterate_shared_proxy)
+    return;
+
+  orig_fops = file->f_op;
+
+  /* We only support iterate_shared for now as iterate is deprecated */
+  if (!orig_fops->iterate_shared)
+    return;
+
+  proxy = hymo_get_fops_proxy(orig_fops);
+  if (!proxy)
+    proxy = hymo_create_fops_proxy(orig_fops);
+
+  if (proxy) {
+    /* Atomically replace fops */
+    file->f_op = &proxy->proxy_fops;
+  }
+}
+
 static void hymofs_set_all_hooks(bool enable) {
   int stage = hymofs_hook_stage_runtime;
   if (!hymo_syms_resolved)
@@ -3511,11 +3665,17 @@ static void hymofs_set_all_hooks(bool enable) {
       hook_func_try(k_vfs_getattr_nosec, 4, NULL, hymofs_vfs_getattr_after, 0);
     }
     if (!hymofs_disable_dirents_runtime) {
-      hook_func_try(k_sys_getdents, 3, hymofs_getdents_before,
-                    hymofs_getdents_after, 0);
-      hook_func_try(k_sys_getdents64, 3, hymofs_getdents64_before,
-                    hymofs_getdents64_after, 0);
-      pr_info("hymofs: dirents hooks done\n");
+      /*
+       * Route A: Fops Hooking
+       * Use vfs_open hook to intercept file openings and replace f_op.
+       * This avoids unstable inline hooks on getdents/readdir.
+       */
+      if (k_vfs_open) {
+        hook_func_try(k_vfs_open, 2, NULL, hymofs_vfs_open_after, 0);
+        pr_info("hymofs: vfs_open hook enabled (Route A)\n");
+      } else {
+        pr_err("hymofs: vfs_open not found, dirents hiding disabled\n");
+      }
     }
 
     if (stage >= 2 && k_filename_lookup &&
@@ -3575,8 +3735,7 @@ static void hymofs_set_all_hooks(bool enable) {
   unhook_func(k_getname_uflags);
   unhook_func(k_filename_lookup);
   unhook_func(k_vfs_getattr_nosec);
-  unhook_func(k_sys_getdents);
-  unhook_func(k_sys_getdents64);
+  unhook_func(k_vfs_open);
   unhook_func(k_cmdline_proc_show);
   unhook_func(k_show_mountinfo);
   unhook_func(k_sys_newuname);
@@ -3851,6 +4010,104 @@ out:
 #endif // #ifdef CONFIG_HYMOFS_HIDE_ENTRIES
 }
 
+/* syscall-wrapper variant: __arm64_sys_getdents*(const struct pt_regs *regs) */
+static void hymofs_getdents_regs_before(hook_fargs1_t *args, void *udata) {
+#ifdef CONFIG_HYMOFS_HIDE_ENTRIES
+  struct pt_regs *regs = (struct pt_regs *)args->arg0;
+  unsigned int fd;
+  struct file *file;
+  struct hymo_readdir_context *ctx;
+
+  args->local.data0 = 0;
+  args->local.data1 = 0;
+
+  if (!regs)
+    return;
+
+  if (!hymofs_enabled || hymofs_exiting || hymo_safe_mode)
+    return;
+  if (hymo_system_state() < SYSTEM_RUNNING)
+    return;
+  if (likely(!hymofs_has_any_rules()))
+    return;
+
+  fd = (unsigned int)regs->regs[0];
+  file = fget(fd);
+  if (!file) {
+    /* Override syscall return via pt_regs */
+    regs->regs[0] = (unsigned long)-EBADF;
+    args->ret = (uint64_t)-EBADF;
+    args->skip_origin = 1;
+    return;
+  }
+
+  ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
+  if (!ctx) {
+    fput(file);
+    return;
+  }
+  ctx->magic = HYMO_CTX_MAGIC;
+  ctx->file = file;
+  hymofs_prepare_readdir(ctx, file);
+
+  args->local.data0 = (uint64_t)ctx;
+  args->local.data1 = (uint64_t)file;
+#endif // #ifdef CONFIG_HYMOFS_HIDE_ENTRIES
+}
+
+static void hymofs_getdents_regs_after(hook_fargs1_t *args, void *udata) {
+#ifdef CONFIG_HYMOFS_HIDE_ENTRIES
+  struct pt_regs *regs = (struct pt_regs *)args->arg0;
+  struct hymo_readdir_context *ctx =
+      (struct hymo_readdir_context *)args->local.data0;
+  struct file *file = (struct file *)args->local.data1;
+  ssize_t ret = (ssize_t)args->ret;
+
+  if (!regs || !ctx || !file)
+    return;
+  if (!hymo_ptr_is_kernel(ctx) || !hymo_ptr_is_kernel(file)) {
+    pr_warn("hymofs: getdents(regs) ctx ptr invalid, skip cleanup\n");
+    return;
+  }
+  if (!hymo_ctx_valid(ctx, file)) {
+    pr_warn("hymofs: getdents(regs) ctx invalid, skip cleanup\n");
+    return;
+  }
+
+  if (ret > 0) {
+    void __user *dirent = (void __user *)regs->regs[1];
+    unsigned int count = (unsigned int)regs->regs[2];
+    ssize_t filtered = hymofs_filter_dirents(ctx, dirent, ret, false);
+    if (filtered < 0) {
+      regs->regs[0] = (unsigned long)filtered;
+      args->ret = (uint64_t)filtered;
+      goto out;
+    }
+    regs->regs[0] = (unsigned long)filtered;
+    args->ret = (uint64_t)filtered;
+
+#ifdef CONFIG_HYMOFS_INJECT_ENTRIES
+    if (filtered >= 0 && filtered < (ssize_t)count &&
+        file->f_pos < HYMO_MAGIC_POS && !signal_pending(current)) {
+      void __user *dir_ptr = (char __user *)dirent + filtered;
+      int remain = (int)count - (int)filtered;
+      int res = hymofs_inject_entries(ctx, &dir_ptr, &remain, &file->f_pos);
+      if (res > 0) {
+        regs->regs[0] = (unsigned long)(count - remain);
+        args->ret = (uint64_t)(count - remain);
+      }
+    }
+#endif // #ifdef CONFIG_HYMOFS_INJECT_ENTRIES
+  }
+
+out:
+  hymofs_cleanup_readdir(ctx);
+  ctx->magic = 0;
+  kfree(ctx);
+  fput(file);
+#endif // #ifdef CONFIG_HYMOFS_HIDE_ENTRIES
+}
+
 static void hymofs_getdents64_before(hook_fargs3_t *args, void *udata) {
 #ifdef CONFIG_HYMOFS_HIDE_ENTRIES
   unsigned int fd = (unsigned int)args->arg0;
@@ -3946,6 +4203,102 @@ static void hymofs_getdents64_after(hook_fargs3_t *args, void *udata) {
       int res = hymofs_inject_entries64(ctx, &dir_ptr, &remain, &file->f_pos);
       if (res > 0)
         args->ret = count - remain;
+    }
+#endif // #ifdef CONFIG_HYMOFS_INJECT_ENTRIES
+  }
+
+out:
+  hymofs_cleanup_readdir(ctx);
+  ctx->magic = 0;
+  kfree(ctx);
+  fput(file);
+#endif // #ifdef CONFIG_HYMOFS_HIDE_ENTRIES
+}
+
+static void hymofs_getdents64_regs_before(hook_fargs1_t *args, void *udata) {
+#ifdef CONFIG_HYMOFS_HIDE_ENTRIES
+  struct pt_regs *regs = (struct pt_regs *)args->arg0;
+  unsigned int fd;
+  struct file *file;
+  struct hymo_readdir_context *ctx;
+
+  args->local.data0 = 0;
+  args->local.data1 = 0;
+
+  if (!regs)
+    return;
+
+  if (!hymofs_enabled || hymofs_exiting || hymo_safe_mode)
+    return;
+  if (hymo_system_state() < SYSTEM_RUNNING)
+    return;
+  if (likely(!hymofs_has_any_rules()))
+    return;
+
+  fd = (unsigned int)regs->regs[0];
+  file = fget(fd);
+  if (!file) {
+    regs->regs[0] = (unsigned long)-EBADF;
+    args->ret = (uint64_t)-EBADF;
+    args->skip_origin = 1;
+    return;
+  }
+
+  ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
+  if (!ctx) {
+    fput(file);
+    return;
+  }
+  ctx->magic = HYMO_CTX_MAGIC;
+  ctx->file = file;
+  hymofs_prepare_readdir(ctx, file);
+
+  args->local.data0 = (uint64_t)ctx;
+  args->local.data1 = (uint64_t)file;
+#endif // #ifdef CONFIG_HYMOFS_HIDE_ENTRIES
+}
+
+static void hymofs_getdents64_regs_after(hook_fargs1_t *args, void *udata) {
+#ifdef CONFIG_HYMOFS_HIDE_ENTRIES
+  struct pt_regs *regs = (struct pt_regs *)args->arg0;
+  struct hymo_readdir_context *ctx =
+      (struct hymo_readdir_context *)args->local.data0;
+  struct file *file = (struct file *)args->local.data1;
+  ssize_t ret = (ssize_t)args->ret;
+
+  if (!regs || !ctx || !file)
+    return;
+  if (!hymo_ptr_is_kernel(ctx) || !hymo_ptr_is_kernel(file)) {
+    pr_warn("hymofs: getdents64(regs) ctx ptr invalid, skip cleanup\n");
+    return;
+  }
+  if (!hymo_ctx_valid(ctx, file)) {
+    pr_warn("hymofs: getdents64(regs) ctx invalid, skip cleanup\n");
+    return;
+  }
+
+  if (ret > 0) {
+    void __user *dirent = (void __user *)regs->regs[1];
+    unsigned int count = (unsigned int)regs->regs[2];
+    ssize_t filtered = hymofs_filter_dirents(ctx, dirent, ret, true);
+    if (filtered < 0) {
+      regs->regs[0] = (unsigned long)filtered;
+      args->ret = (uint64_t)filtered;
+      goto out;
+    }
+    regs->regs[0] = (unsigned long)filtered;
+    args->ret = (uint64_t)filtered;
+
+#ifdef CONFIG_HYMOFS_INJECT_ENTRIES
+    if (filtered >= 0 && filtered < (ssize_t)count &&
+        file->f_pos < HYMO_MAGIC_POS && !signal_pending(current)) {
+      void __user *dir_ptr = (char __user *)dirent + filtered;
+      int remain = (int)count - (int)filtered;
+      int res = hymofs_inject_entries64(ctx, &dir_ptr, &remain, &file->f_pos);
+      if (res > 0) {
+        regs->regs[0] = (unsigned long)(count - remain);
+        args->ret = (uint64_t)(count - remain);
+      }
     }
 #endif // #ifdef CONFIG_HYMOFS_INJECT_ENTRIES
   }
@@ -4151,17 +4504,16 @@ static long hymofs_kpm_init(const char *args, const char *event,
                             void *__user reserved) {
   int rc;
   static const char *const getdents_syms[] = {
-      "__arm64_sys_getdents",
-      "sys_getdents",
-      "__se_sys_getdents",
-      "__do_sys_getdents",
+      /* Prefer ksys_* helpers (stable args ABI, avoid syscall wrapper traps) */
+      "ksys_getdents", "__se_sys_getdents",    "__do_sys_getdents",
+      "sys_getdents",  "__arm64_sys_getdents",
   };
   static const char *const getdents64_syms[] = {
-      "__arm64_sys_getdents64",
-      "sys_getdents64",
-      "__se_sys_getdents64",
-      "__do_sys_getdents64",
+      "ksys_getdents64", "__se_sys_getdents64",    "__do_sys_getdents64",
+      "sys_getdents64",  "__arm64_sys_getdents64",
   };
+  const char *getdents_sym = NULL;
+  const char *getdents64_sym = NULL;
   static const char *const newuname_syms[] = {
       "__arm64_sys_newuname",
       "sys_newuname",
@@ -4214,14 +4566,57 @@ static long hymofs_kpm_init(const char *args, const char *event,
   lookup_name_try_sym(k_getname, "getname");
   lookup_name_try_sym(k_getname_uflags, "getname_uflags");
   lookup_name_try_sym(k_vfs_getattr_nosec, "vfs_getattr_nosec");
-  k_sys_getdents = (typeof(k_sys_getdents))hymofs_lookup_any(
-      getdents_syms, ARRAY_SIZE(getdents_syms));
+
+  {
+    static const char *const vfs_open_syms[] = {
+        "vfs_open",
+        "do_dentry_open",
+    };
+    const char *vfs_open_sym = NULL;
+    k_vfs_open = (typeof(k_vfs_open))hymofs_lookup_any_with_name(
+        vfs_open_syms, ARRAY_SIZE(vfs_open_syms), &vfs_open_sym);
+    if (k_vfs_open)
+      pr_info("hymofs: vfs_open target=%s\n", vfs_open_sym);
+    else
+      pr_warn("hymofs: vfs_open not found\n");
+  }
+
+  k_sys_getdents = (typeof(k_sys_getdents))hymofs_lookup_any_with_name(
+      getdents_syms, ARRAY_SIZE(getdents_syms), &getdents_sym);
   if (!k_sys_getdents)
     pr_warn("kernel function getdents not found\n");
-  k_sys_getdents64 = (typeof(k_sys_getdents64))hymofs_lookup_any(
-      getdents64_syms, ARRAY_SIZE(getdents64_syms));
+  k_sys_getdents64 = (typeof(k_sys_getdents64))hymofs_lookup_any_with_name(
+      getdents64_syms, ARRAY_SIZE(getdents64_syms), &getdents64_sym);
   if (!k_sys_getdents64)
     pr_warn("kernel function getdents64 not found\n");
+  hymo_getdents_use_regs =
+      (getdents_sym && !strcmp(getdents_sym, "__arm64_sys_getdents"));
+  hymo_getdents64_use_regs =
+      (getdents64_sym && !strcmp(getdents64_sym, "__arm64_sys_getdents64"));
+  hymo_getdents_sym_name = getdents_sym;
+  hymo_getdents64_sym_name = getdents64_sym;
+  if (k_sys_getdents)
+    pr_info("hymofs: getdents target=%s ABI=%s\n",
+            hymo_getdents_sym_name ? hymo_getdents_sym_name : "(unknown)",
+            hymo_getdents_use_regs ? "pt_regs" : "args");
+  if (k_sys_getdents64)
+    pr_info("hymofs: getdents64 target=%s ABI=%s\n",
+            hymo_getdents64_sym_name ? hymo_getdents64_sym_name : "(unknown)",
+            hymo_getdents64_use_regs ? "pt_regs" : "args");
+
+  /*
+   * Device-specific stability:
+   * Some vendor kernels only expose syscall-wrapper __arm64_sys_getdents* via
+   * kallsyms, and hooking those wrappers has been observed to cause early-boot
+   * crashes. In that case, disable dirents hooks entirely (keep other hooks).
+   */
+  if (hymo_getdents_use_regs || hymo_getdents64_use_regs) {
+    pr_err(
+        "hymofs: dirents hooks disabled (wrapper-only symbols are unstable)\n");
+    k_sys_getdents = NULL;
+    k_sys_getdents64 = NULL;
+    hymofs_disable_dirents_runtime = true;
+  }
 
   lookup_name_continue_sym(k_filename_lookup, "filename_lookup");
 
