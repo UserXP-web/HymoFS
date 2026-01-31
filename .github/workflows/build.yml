@@ -24,11 +24,6 @@ jobs:
     name: Build HymoFS KPM
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    container:
-      # Provide a complete kernel build environment + kernel sources/headers.
-      # Refer to YukiSU/.github/workflows/ddk-lkm.yml
-      image: ghcr.io/ylarod/ddk:${{ inputs.kmi || 'android15-6.6' }}-${{ inputs.ddk_release || '20251104' }}
-      options: --privileged
     permissions:
       contents: write
     steps:
@@ -37,11 +32,23 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Install build dependencies
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          # Toolchain for KPM build (clang/lld/objcopy) + kernel prepare deps
+          sudo apt-get install -y \
+            git make \
+            clang lld llvm \
+            flex bison bc \
+            libelf-dev libssl-dev \
+            pahole
+
       - name: Build (release + debug)
         run: |
           set -euxo pipefail
           # GitHub checkout inside container needs this sometimes.
-          git config --global --add safe.directory /__w/HymoFS/HymoFS || true
+          git config --global --add safe.directory "$GITHUB_WORKSPACE" || true
 
           # Detect kernel source directory provided by DDK image.
           # Note: some setups keep kernel sources under the checked-out workspace
@@ -71,9 +78,9 @@ jobs:
             fi
           done
           if [ -z "$KERNEL_SRC" ]; then
-            echo "WARN: cannot locate kernel source in container image."
+            echo "WARN: cannot locate kernel source locally."
             echo "pwd=$PWD"
-            echo "Attempting to fetch Android common kernel sources for ${KMI}..."
+            echo "Fetching Android common kernel sources for ${KMI}..."
 
             # Place sources under patch_workspace/<kmi>/common to match local dev layout.
             mkdir -p "$PWD/patch_workspace/${KMI}"
@@ -100,6 +107,18 @@ jobs:
           fi
 
           echo "Using KERNEL_SRC=$KERNEL_SRC"
+
+          # Kernel headers expect generated/autoconf.h. A plain git clone does
+          # NOT contain it, so we must run a minimal prepare step.
+          if [ ! -f "$KERNEL_SRC/include/generated/autoconf.h" ]; then
+            echo "Preparing kernel tree to generate include/generated/autoconf.h ..."
+            if [ -f "$KERNEL_SRC/arch/arm64/configs/gki_defconfig" ]; then
+              make -C "$KERNEL_SRC" ARCH=arm64 gki_defconfig
+            else
+              make -C "$KERNEL_SRC" ARCH=arm64 defconfig
+            fi
+            make -C "$KERNEL_SRC" ARCH=arm64 prepare
+          fi
 
           make -C hymofs_kpm clean || true
           # Build with toolchain provided by the container image.
