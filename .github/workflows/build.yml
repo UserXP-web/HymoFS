@@ -71,24 +71,23 @@ jobs:
             fi
           done
           if [ -z "$KERNEL_SRC" ]; then
-            echo "ERROR: cannot locate kernel source in container image."
+            echo "WARN: cannot locate kernel source in container image."
             echo "pwd=$PWD"
-            echo "Hint: ensure kernel sources/headers are available, e.g.:"
-            echo "  - $PWD/patch_workspace/${KMI}/common"
-            echo "  - /${KMI}/common"
-            echo "Or update the candidate list in .github/workflows/build.yml"
-            exit 1
+            echo "Proceeding without KERNEL_SRC (use KernelPatch bundled headers)."
+            KERNEL_ARG=""
+          else
+            echo "Using KERNEL_SRC=$KERNEL_SRC"
+            KERNEL_ARG="KERNEL_SRC=$KERNEL_SRC"
           fi
-          echo "Using KERNEL_SRC=$KERNEL_SRC"
 
-          make -C hymofs_kpm clean
+          make -C hymofs_kpm clean || true
           # Build with toolchain provided by the container image.
           # We override CC/LD/OBJCOPY to avoid relying on Android NDK layout.
           make -C hymofs_kpm \
-            KERNEL_SRC="$KERNEL_SRC" \
+            $KERNEL_ARG \
             CC=clang LD=ld.lld OBJCOPY=llvm-objcopy
           make -C hymofs_kpm debug \
-            KERNEL_SRC="$KERNEL_SRC" \
+            $KERNEL_ARG \
             CC=clang LD=ld.lld OBJCOPY=llvm-objcopy || true
           ls -lah ./hymofs_*.kpm
 
