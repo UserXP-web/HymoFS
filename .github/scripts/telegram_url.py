@@ -39,8 +39,9 @@ caption = f"[{commit_id}]({commit_url})\n{msg}"[:1024]
 
 data = json.dumps(
     [
-        {"type": "document", "media": "attach://Release1"},
-        {"type": "document", "media": "attach://Release2", "caption": caption, "parse_mode": "MarkdownV2"},
+        # Put caption on the main artifact (Release1).
+        {"type": "document", "media": "attach://Release1", "caption": caption, "parse_mode": "MarkdownV2"},
+        {"type": "document", "media": "attach://Release2"},
     ]
 )
 
