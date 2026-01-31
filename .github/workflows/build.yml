@@ -113,11 +113,12 @@ jobs:
           if [ ! -f "$KERNEL_SRC/include/generated/autoconf.h" ]; then
             echo "Preparing kernel tree to generate include/generated/autoconf.h ..."
             if [ -f "$KERNEL_SRC/arch/arm64/configs/gki_defconfig" ]; then
-              make -C "$KERNEL_SRC" ARCH=arm64 gki_defconfig
+              # Use LLVM toolchain for target objects needed by prepare (e.g. scripts/mod/empty.o).
+              make -C "$KERNEL_SRC" ARCH=arm64 LLVM=1 LLVM_IAS=1 gki_defconfig
             else
-              make -C "$KERNEL_SRC" ARCH=arm64 defconfig
+              make -C "$KERNEL_SRC" ARCH=arm64 LLVM=1 LLVM_IAS=1 defconfig
             fi
-            make -C "$KERNEL_SRC" ARCH=arm64 prepare
+            make -C "$KERNEL_SRC" ARCH=arm64 LLVM=1 LLVM_IAS=1 prepare
           fi
 
           make -C hymofs_kpm clean || true
