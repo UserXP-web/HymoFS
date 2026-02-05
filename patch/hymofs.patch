@@ -284,10 +284,10 @@ index f5f972488..28705cd03 100644
  
 diff --git a/fs/hymofs.c b/fs/hymofs.c
 new file mode 100644
-index 000000000..1703c14bb
+index 000000000..eac5100b3
 --- /dev/null
 +++ b/fs/hymofs.c
-@@ -0,0 +1,2748 @@
+@@ -0,0 +1,2778 @@
 +#include <linux/string.h>
 +#include <linux/mm.h>
 +#include <linux/file.h>
@@ -330,6 +330,8 @@ index 000000000..1703c14bb
 +#include <linux/miscdevice.h>
 +#include <linux/anon_inodes.h>
 +#include <linux/jhash.h>
++#include <linux/version.h>
++#include <linux/rbtree.h>
 +#include "mount.h"
 +
 +#include <linux/hymofs.h>
@@ -660,20 +662,33 @@ index 000000000..1703c14bb
 +    struct mount *m;
 +    int id = 1;
 +    bool is_hymo_mount;
-+    
-+    // Try to find the starting ID from the first mount
-+    if (ns && !list_empty(&ns->list)) {
-+        struct mount *first = list_first_entry(&ns->list, struct mount, mnt_list);
-+        if (first->mnt_id < 500000) id = first->mnt_id;
-+    }
 +
 +    if (!ns) return;
 +
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0))
++    /* 6.12+: ns->mounts is rb_root */
++    struct mount *n;
++    if (ns->mounts.rb_node) {
++        struct rb_node *first_node = rb_first(&ns->mounts);
++        if (first_node) {
++            struct mount *first = rb_entry(first_node, struct mount, mnt_node);
++            if (first->mnt_id < 500000)
++                id = first->mnt_id;
++        }
++    }
++    rbtree_postorder_for_each_entry_safe(m, n, &ns->mounts, mnt_node) {
++#else
++    if (!list_empty(&ns->list)) {
++        struct mount *first = list_first_entry(&ns->list, struct mount, mnt_list);
++        if (first->mnt_id < 500000)
++            id = first->mnt_id;
++    }
 +    list_for_each_entry(m, &ns->list, mnt_list) {
++#endif
 +        is_hymo_mount = false;
-+        
++
 +        if (m->mnt_devname && (
-+            strcmp(m->mnt_devname, hymo_current_mirror_path) == 0 || 
++            strcmp(m->mnt_devname, hymo_current_mirror_path) == 0 ||
 +            strcmp(m->mnt_devname, hymo_current_mirror_name) == 0
 +        )) {
 +            is_hymo_mount = true;
@@ -694,6 +709,9 @@ index 000000000..1703c14bb
 +{
 +    struct mnt_namespace *ns = current->nsproxy->mnt_ns;
 +    struct mount *m;
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0))
++    struct mount *n;
++#endif
 +    char *system_devname = NULL;
 +    struct path sys_path;
 +
@@ -720,9 +738,13 @@ index 000000000..1703c14bb
 +
 +    if (!system_devname) return;
 +
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0))
++    rbtree_postorder_for_each_entry_safe(m, n, &ns->mounts, mnt_node) {
++#else
 +    list_for_each_entry(m, &ns->list, mnt_list) {
++#endif
 +        if (m->mnt_devname && (
-+            strcmp(m->mnt_devname, hymo_current_mirror_path) == 0 || 
++            strcmp(m->mnt_devname, hymo_current_mirror_path) == 0 ||
 +            strcmp(m->mnt_devname, hymo_current_mirror_name) == 0
 +        )) {
 +            const char *old_name = m->mnt_devname;
@@ -2139,14 +2161,22 @@ index 000000000..1703c14bb
 +    size_t dir_len, name_len;
 +
 +    f = fdget(dfd);
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0))
++    if (fd_empty(f))
++        return NULL;
++#else
 +    if (!f.file)
 +        return NULL;
++#endif
 +
 +    buf = kmalloc(PATH_MAX, GFP_KERNEL);
 +    if (!buf)
 +        goto out_fdput;
-+
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0))
++    dir_path = d_path(&fd_file(f)->f_path, buf, PATH_MAX);
++#else
 +    dir_path = d_path(&f.file->f_path, buf, PATH_MAX);
++#endif
 +    if (IS_ERR(dir_path))
 +        goto out_free;
 +
