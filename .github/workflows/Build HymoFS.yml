@@ -1,4 +1,4 @@
-name: Build SukiSU Ultra
+name: Build HymoFS
 
 env:
   CPU: sm8550
@@ -14,7 +14,7 @@ on:
          
 jobs:
   build:
-    name: Build SukiSU Kernel - HymoFS Test
+    name: Build Kernel Only - HymoFS Test
     runs-on: ubuntu-latest
     env:
       CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
