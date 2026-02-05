@@ -2,7 +2,7 @@ name: Build HymoFS Kernel
 
 env:
   CPU: mt6991
-  FEIL: oneplus_ace5_ultra_b
+  FEIL: oneplus_ace5_ultra
   ANDROID_VERSION: android15
   KERNEL_VERSION: 6.6
   APPLY_HYMOFS: On
