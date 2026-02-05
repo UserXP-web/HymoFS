@@ -2,7 +2,7 @@ name: Build SukiSU Ultra
 
 env:
   CPU: sm8475
-  FEIL: oneplus_10_t
+  FEIL: oneplus_10t
   ANDROID_VERSION: android12
   KERNEL_VERSION: 5.10
   APPLY_HYMOFS: On
