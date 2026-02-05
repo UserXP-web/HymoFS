@@ -3356,7 +3356,7 @@ index a6f761219..5379c4cd2 100644
  	seq_putc(m, '\n');
  	return 0;
 diff --git a/fs/readdir.c b/fs/readdir.c
-index 6d29cab85..be924bc92 100644
+index 6d29cab85..ca9775184 100644
 --- a/fs/readdir.c
 +++ b/fs/readdir.c
 @@ -22,6 +22,10 @@
@@ -3450,12 +3450,12 @@ index 6d29cab85..be924bc92 100644
  	if (!fd_file(f))
  		return -EBADF;
 +#ifdef CONFIG_HYMOFS_HIDE_ENTRIES
-+	hymofs_prepare_readdir(&buf.hymo, f.file);
++	hymofs_prepare_readdir(&buf.hymo, fd_file(f));
 +#endif
 +#ifdef CONFIG_HYMOFS_INJECT_ENTRIES
-+	if (f.file->f_pos >= HYMO_MAGIC_POS) {
++	if (fd_file(f)->f_pos >= HYMO_MAGIC_POS) {
 +		void __user *dir_ptr = buf.current_dir;
-+		int res = hymofs_inject_entries(&buf.hymo, &dir_ptr, &buf.count, &f.file->f_pos);
++		int res = hymofs_inject_entries(&buf.hymo, &dir_ptr, &buf.count, &fd_file(f)->f_pos);
 +		if (res >= 0)
 +			error = count - buf.count;
 +		else
@@ -3477,7 +3477,7 @@ index 6d29cab85..be924bc92 100644
 +#ifdef CONFIG_HYMOFS_INJECT_ENTRIES
 +	if (error >= 0 && !buf.buffer_full && buf.ctx.pos < HYMO_MAGIC_POS && !signal_pending(current)) {
 +		void __user *dir_ptr = buf.current_dir;
-+		int res = hymofs_inject_entries(&buf.hymo, &dir_ptr, &buf.count, &f.file->f_pos);
++		int res = hymofs_inject_entries(&buf.hymo, &dir_ptr, &buf.count, &fd_file(f)->f_pos);
 +		if (res > 0)
 +			error = count - buf.count;
 +	}
@@ -3540,12 +3540,12 @@ index 6d29cab85..be924bc92 100644
  		return -EBADF;
  
 +#ifdef CONFIG_HYMOFS_HIDE_ENTRIES
-+	hymofs_prepare_readdir(&buf.hymo, f.file);
++	hymofs_prepare_readdir(&buf.hymo, fd_file(f));
 +#endif
 +#ifdef CONFIG_HYMOFS_INJECT_ENTRIES
-+	if (f.file->f_pos >= HYMO_MAGIC_POS) {
++	if (fd_file(f)->f_pos >= HYMO_MAGIC_POS) {
 +		void __user *dir_ptr = buf.current_dir;
-+		int res = hymofs_inject_entries64(&buf.hymo, &dir_ptr, &buf.count, &f.file->f_pos);
++		int res = hymofs_inject_entries64(&buf.hymo, &dir_ptr, &buf.count, &fd_file(f)->f_pos);
 +		if (res >= 0)
 +			error = count - buf.count;
 +		else
@@ -3568,7 +3568,7 @@ index 6d29cab85..be924bc92 100644
 +#ifdef CONFIG_HYMOFS_INJECT_ENTRIES
 +	if (error >= 0 && !buf.buffer_full && buf.ctx.pos < HYMO_MAGIC_POS && !signal_pending(current)) {
 +		void __user *dir_ptr = buf.current_dir;
-+		int res = hymofs_inject_entries64(&buf.hymo, &dir_ptr, &buf.count, &f.file->f_pos);
++		int res = hymofs_inject_entries64(&buf.hymo, &dir_ptr, &buf.count, &fd_file(f)->f_pos);
 +		if (res > 0)
 +			error = count - buf.count;
 +	}
@@ -3633,7 +3633,7 @@ index 6d29cab85..be924bc92 100644
  		return -EBADF;
  
 +#ifdef CONFIG_HYMOFS_HIDE_ENTRIES
-+	hymofs_prepare_readdir(&buf.hymo, f.file);
++	hymofs_prepare_readdir(&buf.hymo, fd_file(f));
 +#endif
 +
  	error = iterate_dir(fd_file(f), &buf.ctx);
