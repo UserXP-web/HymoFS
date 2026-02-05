@@ -80,7 +80,19 @@ if [ "$MANUAL_BRANCH" = false ]; then
         if [ -n "$KVER" ] && [ -n "$KPATCH" ]; then
             FULL_VER="$KVER.$KPATCH"
             echo ">>> Detected Kernel Version: $FULL_VER"
-            
+
+            AVER=""
+            if [ -n "${ANDROID_VERSION:-}" ]; then
+                AVER="$ANDROID_VERSION"
+                echo ">>> Android version from env: $AVER"
+            elif [ -f "$KERNEL_DIR/build.config.constants" ]; then
+                BUILD_BRANCH=$(grep "^BRANCH=" "$KERNEL_DIR/build.config.constants" | head -n1 | sed 's/BRANCH=android\([0-9]*\).*/\1/')
+                if [ -n "$BUILD_BRANCH" ]; then
+                    AVER="$BUILD_BRANCH"
+                    echo ">>> Android version from build.config.constants: $AVER"
+                fi
+            fi
+
             if [ "$KVER" -eq 6 ] && [ "$KPATCH" -eq 1 ]; then
                 BRANCH="android14_6.1"
                 echo ">>> Auto-selected branch: $BRANCH"
@@ -91,11 +103,22 @@ if [ "$MANUAL_BRANCH" = false ]; then
                 BRANCH="android16_6.12"
                 echo ">>> Auto-selected branch: $BRANCH"
             elif [ "$KVER" -eq 5 ] && [ "$KPATCH" -eq 15 ]; then
-                BRANCH="android13_5.15"
+                if [ "$AVER" = "14" ]; then
+                    BRANCH="android14_5.15"
+                else
+                    BRANCH="android13_5.15"
+                fi
+                echo ">>> Auto-selected branch: $BRANCH"
+            elif [ "$KVER" -eq 5 ] && [ "$KPATCH" -eq 10 ]; then
+                if [ "$AVER" = "13" ]; then
+                    BRANCH="android13_5.10"
+                else
+                    BRANCH="android12_5.10"
+                fi
                 echo ">>> Auto-selected branch: $BRANCH"
             else
                 echo "Error: Unsupported kernel version detected: $FULL_VER"
-                echo "Currently only Kernel5.15, 6.1 and 6.6 are supported."
+                echo "Currently only Kernel5.10, 5.15, 6.1, 6.6 and 6.12 are supported."
                 echo "You can force a specific branch using branch <name>"
                 exit 1
             fi
