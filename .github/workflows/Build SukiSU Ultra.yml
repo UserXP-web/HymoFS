@@ -266,7 +266,7 @@ jobs:
           
           # 显示ccache统计信息
           ccache -s
-          echo "✅ 内核编译完成“
+          echo "✅ 内核编译完成"
 
       - name: "🧠 Set Artifact Name | 设置产物名称"
         id: set_name
