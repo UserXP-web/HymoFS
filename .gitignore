@@ -58,3 +58,4 @@ dkms.conf
 local.properties
 
 /patch_workspace
+.DS_Store

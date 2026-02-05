@@ -1,21 +1,16 @@
 name: Build SukiSU Ultra
 
 env:
-  CPU: sm8650
-  FEIL: oneplus_12_b
-  ANDROID_VERSION: android14
-  KERNEL_VERSION: 6.1
-  KPM: Off
-  lz4kd: Off
-  bbr: Off
-  bbg: On
-  proxy: On
+  CPU: sm855ß0
+  FEIL: oneplus_11_b
+  ANDROID_VERSION: android13
+  KERNEL_VERSION: 5.15
   APPLY_HYMOFS: On
 
 on:
   push:
     branches:
-      - android14_6.1
+      - android13_5.15
          
 jobs:
   build:
@@ -144,105 +139,12 @@ jobs:
 
       # ====================== 内核定制阶段 ======================
 
-      - name: "⚡ Setup Baseband-guard | 配置 Baseband-guard"
-        if: ${{ env.bbg == 'On' && env.KPM == 'Off' }}
-        run: |
-          set -e
-          cd kernel_workspace/kernel_platform/common
-          echo "🛠️ 正在设置BBG..."
-          curl -sSL https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh -o setup.sh
-          bash setup.sh     
-              
-      - name: "⚡ Setup SukiSU Ultra | 配置 SukiSU Ultra"
-        run: |
-          cd kernel_workspace/kernel_platform
-
-          # 下载并执行设置脚本
-          echo "🛠️ 正在设置SukiSU Ultra..."
-          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/builtin/kernel/setup.sh" | bash -s builtin
-          
-          cd KernelSU
-          echo "⬇️ 下载SukiSU设置工具..."
-          curl -L -o sukisu_setup.bin https://github.com/Xiaomichael/OnePlus-Actions/raw/Build/script/sukisu_setup.bin
-          chmod +x sukisu_setup.bin
-          
-          # 验证Kbuild存在
-          if [ ! -f "kernel/Kbuild" ]; then
-            echo "❌ 错误：缺少kernel/Kbuild"
-            ls -la
-            exit 1
-          fi
-          
-          ./sukisu_setup.bin
-          rm -rf ./sukisu_setup.bin
-          
-          echo "✅ SukiSU Ultra配置完成"
-          
-      - name: "🔧 Setup SUSFS | 配置 SUSFS"
-        run: |
-          cd kernel_workspace
-
-          echo "⬇️ 克隆所需补丁..."
-          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}
-          git clone https://github.com/Xiaomichael/kernel_patches.git
-          git clone https://github.com/ShirkNeko/SukiSU_patch.git
-          
-          cd kernel_platform
-          echo "📝 复制补丁文件..."
-          cp ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch ./common/
-          cp ../susfs4ksu/kernel_patches/fs/* ./common/fs/
-          cp ../susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
-          cp ../kernel_patches/zram/001-lz4.patch ./common/
-          cp ../kernel_patches/zram/lz4armv8.S ./common/lib
-          cp ../kernel_patches/zram/002-zstd.patch ./common/
-          # Fix missing struct kstat declaration in susfs.h
-          sed -i '/#include <linux\/susfs_def.h>/a struct kstat;' ./common/include/linux/susfs.h
-
-          # Fix missing ksu_seccomp_allow_cache in setuid_hook.c
-          sed -i '/extern void disable_seccomp(void);/a static inline void ksu_seccomp_allow_cache(void *filter, int syscall_nr) { disable_seccomp(); }' ./KernelSU/kernel/setuid_hook.c
-
-          if [ "${{ env.lz4kd }}" == "On" ]; then
-            # Copy lz4k from ShirkNeko
-            cp -r ../SukiSU_patch/other/zram/lz4k/include/linux/* ./common/include/linux
-            cp -r ../SukiSU_patch/other/zram/lz4k/lib/* ./common/lib
-            cp -r ../SukiSU_patch/other/zram/lz4k/crypto/* ./common/crypto
-            cp -r ../SukiSU_patch/other/zram/lz4k_oplus ./common/lib/
-          fi
-          
-          cd ./common
-          
-          if [ "${{ env.lz4kd }}" = "Off" ] && [ "${{ env.KERNEL_VERSION }}" = "6.1" ]; then
-            echo "📦 应用lz4+zstd补丁..."
-            git apply -p1 < 001-lz4.patch || true
-            patch -p1 < 002-zstd.patch || true
-          fi
-
-          if [ "${{ env.lz4kd }}" = "Off" ] && [ "${{ env.KERNEL_VERSION }}" = "6.6" ]; then
-            echo "📦 应用lz4补丁..."
-            git apply -p1 < 001-lz4.patch || true
-          fi
-          
-          if [ "${{ env.lz4kd }}" == "On" ]; then
-            echo "📦 应用lz4kd补丁..."
-            cp ../../SukiSU_patch/other/zram/zram_patch/${{ env.KERNEL_VERSION }}/lz4kd.patch ./
-            patch -p1 -F 3 < lz4kd.patch || true
-            cp ../../SukiSU_patch/other/zram/zram_patch/${{ env.KERNEL_VERSION }}/lz4k_oplus.patch ./
-            patch -p1 -F 3 < lz4k_oplus.patch || true
-          fi
-
-          echo "📦 应用SUSFS补丁..."
-          patch -p1 < 50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch || true
-
-          echo "✅ 所有补丁应用完成"
-
       - name: "⚙️ Apply HymoFS Patch | 应用 HymoFS 补丁"
         if: ${{ env.APPLY_HYMOFS == 'On' }}
         run: |
           cd kernel_workspace/kernel_platform/common
 
-          cp ${{ github.workspace }}/patch/hymofs_with_susfs.patch .
-
-          patch -p1 -F 3 < ${{ github.workspace }}/patch/hymofs_with_susfs.patch
+          patch -p1 -F 3 < ${{ github.workspace }}/patch/hymofs.patch
 
           echo "  [*] HymoFS 代码注入完成！"
 
@@ -280,50 +182,24 @@ jobs:
           cd kernel_workspace/kernel_platform
 
           echo "⚙️ 正在配置内核编译选项..."
-          
-          echo "📦 启用 KSU 支持..."
-          echo "CONFIG_KSU=y" >> ./common/arch/arm64/configs/gki_defconfig
-          
-          if [ "${{ env.KPM }}" == "On" ]; then
-            echo "📦 启用 KPM..."
-            echo "CONFIG_KPM=y" >> ./common/arch/arm64/configs/gki_defconfig
-          fi
 
           if [ "${{ env.APPLY_HYMOFS }}" = "On" ]; then
             echo "CONFIG_HYMOFS=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_HYMOFS_REVERSE_LOOKUP=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_HYMOFS_FORWARD_REDIRECT=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_HYMOFS_HIDE_ENTRIES=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_HYMOFS_INJECT_ENTRIES=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_HYMOFS_STAT_SPOOF=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_HYMOFS_XATTR_FILTER=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_HYMOFS_UNAME_SPOOF=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_HYMOFS_CMDLINE_SPOOF=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_HYMOFS_DEBUG=y" >> ./common/arch/arm64/configs/gki_defconfig
           fi
           
-          echo "📦 启用 SUSFS 功能..."
-          echo "CONFIG_KSU_SUSFS=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SUS_MAP=y" >> ./common/arch/arm64/configs/gki_defconfig
-
           echo "📦 添加对 Mountify (backslashxx/mountify) 模块的支持"
           echo "CONFIG_TMPFS_XATTR=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_TMPFS_POSIX_ACL=y" >> ./common/arch/arm64/configs/gki_defconfig
 
-          if [ "${{ env.bbg }}" == "On" ] && [ "${{ env.KPM }}" == "Off" ]; then
-            echo "⚡ 配置 BBG 中..."
-            echo 'CONFIG_BBG=y' >> ./common/arch/arm64/configs/gki_defconfig
-            echo 'CONFIG_LSM="landlock,lockdown,yama,loadpin,safesetid,integrity,selinux,smack,tomoyo,apparmor,bpf,baseband_guard"' >> ./common/arch/arm64/configs/gki_defconfig
-          fi          
-          
-          if [ "${{ env.bbr }}" == "On" ]; then
-            echo "🌐 启用 BBR 网络算法..."
-            echo "CONFIG_TCP_CONG_ADVANCED=y" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_TCP_CONG_BBR=y" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_NET_SCH_FQ=y" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_TCP_CONG_BIC=n" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_TCP_CONG_WESTWOOD=n" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_TCP_CONG_HTCP=n" >> ./common/arch/arm64/configs/gki_defconfig
-          fi
           
           if [ "${{ env.lz4kd }}" == "On" ]; then
             echo "📦 启用 lz4kd压缩..."
@@ -336,34 +212,6 @@ jobs:
             # Add O2 config
             echo "📦 为6.1 / 6.6加入O2优化..."
             echo "CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y" >> ./common/arch/arm64/configs/gki_defconfig
-          fi
-
-          if [ "${{ env.proxy }}" == "On" ]; then
-            # Add proxy config
-            echo "📦 加入代理优化..."
-            echo "CONFIG_BPF_STREAM_PARSER=y" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_NETFILTER_XT_SET=y" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_IP_SET=y" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_IP_SET_MAX=65534" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_IP_SET_BITMAP_IP=y" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_IP_SET_BITMAP_IPMAC=y" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_IP_SET_BITMAP_PORT=y" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_IP_SET_HASH_IP=y" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_IP_SET_HASH_IPMARK=y" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_IP_SET_HASH_IPPORT=y" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_IP_SET_HASH_IPPORTIP=y" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_IP_SET_HASH_IPPORTNET=y" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_IP_SET_HASH_IPMAC=y" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_IP_SET_HASH_MAC=y" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_IP_SET_HASH_NETPORTNET=y" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_IP_SET_HASH_NET=y" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_IP_SET_HASH_NETNET=y" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_IP_SET_HASH_NETPORT=y" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_IP_SET_HASH_NETIFACE=y" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_IP_SET_LIST_SET=y" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_IP6_NF_NAT=y" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_IP6_NF_TARGET_MASQUERADE=y" >> ./common/arch/arm64/configs/gki_defconfig
           fi
           
           if [ "${{ env.KERNEL_VERSION }}" = "5.10" ] || [ "${{ env.KERNEL_VERSION }}" = "5.15" ]; then
@@ -418,20 +266,7 @@ jobs:
           
           # 显示ccache统计信息
           ccache -s
-          echo "✅ 内核编译完成"
-         
-      - name: "🧩 Patch Kernel Image (KPM) | KPM修补镜像"
-        if: ${{ env.KPM == 'On' }}
-        run: |
-          echo "🔧 正在应用KPM补丁..."
-          cd kernel_workspace/kernel_platform/out/Final-Image-Find
-          curl -LO https://github.com/SukiSU-Ultra/SukiSU_KernelPatch_patch/releases/download/0.12.2/patch_linux
-          chmod +x patch_linux
-          ./patch_linux
-          rm -f Image
-          mv oImage Image
-          cp Image $GITHUB_WORKSPACE/AnyKernel3/Image
-          echo "✅ KPM补丁应用完成"
+          echo "✅ 内核编译完成“
 
       - name: "🧠 Set Artifact Name | 设置产物名称"
         id: set_name
@@ -537,7 +372,3 @@ jobs:
           BOT_TOKEN: ${{secrets.TELEGRAM_BOT_TOKEN}}
           KernelVer: ${{ env.ANDROID_VERSION}}-${{ env.KERNEL_VERSION }}
           DEVICE: ${{ env.FEIL }}
-          KPM: ${{ env.KPM }}
-          LZ4KD: ${{ env.lz4kd }}
-          BBR: ${{ env.bbr }}
-          KSU_VAR: "SukiSU"
