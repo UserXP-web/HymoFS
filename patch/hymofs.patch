@@ -259,10 +259,10 @@ index b70f5fc73..7bbbfcf4b 100644
  /*
 diff --git a/fs/hymofs.c b/fs/hymofs.c
 new file mode 100644
-index 000000000..1703c14bb
+index 000000000..104732c4e
 --- /dev/null
 +++ b/fs/hymofs.c
-@@ -0,0 +1,2748 @@
+@@ -0,0 +1,2756 @@
 +#include <linux/string.h>
 +#include <linux/mm.h>
 +#include <linux/file.h>
@@ -898,7 +898,9 @@ index 000000000..1703c14bb
 +    if (cmd == HYMO_CMD_SET_MIRROR_PATH) {
 +        char *new_path = NULL;
 +        char *new_name = NULL;
-+        
++        size_t len;
++        char *slash;
++
 +        if (req.src) {
 +            new_path = strndup_user(req.src, PATH_MAX);
 +            if (IS_ERR(new_path)) return PTR_ERR(new_path);
@@ -909,12 +911,12 @@ index 000000000..1703c14bb
 +        hymo_log("setting mirror path to: %s\n", new_path);
 +
 +        /* Strip trailing slash if present */
-+        size_t len = strlen(new_path);
++        len = strlen(new_path);
 +        if (len > 1 && new_path[len - 1] == '/') {
 +            new_path[len - 1] = '\0';
 +        }
 +
-+        char *slash = strrchr(new_path, '/');
++        slash = strrchr(new_path, '/');
 +        if (slash) {
 +            new_name = kstrdup(slash + 1, GFP_KERNEL);
 +        } else {
@@ -1038,11 +1040,12 @@ index 000000000..1703c14bb
 +                    /* Always extract parent directory for injection, even if file exists */
 +                    {
 +                        char *last_slash = strrchr(res, '/');
++                        size_t len;
 +                        if (last_slash) {
 +                            if (last_slash == res) {
 +                                parent_dir = kstrdup("/", GFP_KERNEL);
 +                            } else {
-+                                size_t len = last_slash - res;
++                                len = last_slash - res;
 +                                parent_dir = kmalloc(len + 1, GFP_KERNEL);
 +                                if (parent_dir) {
 +                                    memcpy(parent_dir, res, len);
@@ -1064,9 +1067,11 @@ index 000000000..1703c14bb
 +                path_put(&path);
 +            } else {
 +                char *last_slash = strrchr(src, '/');
++                size_t len, res_len, name_len;
++                char *p_str;
 +                if (last_slash && last_slash != src) {
-+                    size_t len = last_slash - src;
-+                    char *p_str = kmalloc(len + 1, GFP_KERNEL);
++                    len = last_slash - src;
++                    p_str = kmalloc(len + 1, GFP_KERNEL);
 +                    if (p_str) {
 +                        memcpy(p_str, src, len);
 +                        p_str[len] = '\0';
@@ -1074,8 +1079,8 @@ index 000000000..1703c14bb
 +                        if (kern_path(p_str, LOOKUP_FOLLOW, &path) == 0) {
 +                            char *res = d_path(&path, tmp_buf, PATH_MAX);
 +                            if (!IS_ERR(res)) {
-+                                size_t res_len = strlen(res);
-+                                size_t name_len = strlen(last_slash);
++                                res_len = strlen(res);
++                                name_len = strlen(last_slash);
 +                                resolved_src = kmalloc(res_len + name_len + 1, GFP_KERNEL);
 +                                if (resolved_src) {
 +                                    strcpy(resolved_src, res);
@@ -1455,10 +1460,11 @@ index 000000000..1703c14bb
 +    
 +    p = pathname + path_len;
 +    while (p > pathname) {
++        size_t current_len;
 +        while (p > pathname && *p != '/') p--;
 +        if (p == pathname && *p != '/') break;
 +        
-+        size_t current_len = p - pathname;
++        current_len = p - pathname;
 +        if (current_len == 0) {
 +            break;
 +        }
@@ -1469,12 +1475,13 @@ index 000000000..1703c14bb
 +                strncmp(merge_entry->src, pathname, current_len) == 0) {
 +                
 +                const char *suffix = pathname + current_len;
++                size_t target_len, suffix_len;
 +                if (suffix[0] == '\0' || strcmp(suffix, "/.") == 0 || strcmp(suffix, "/..") == 0) {
 +                    continue;
 +                }
 +
-+                size_t target_len = strlen(merge_entry->target);
-+                size_t suffix_len = path_len - current_len;
++                target_len = strlen(merge_entry->target);
++                suffix_len = path_len - current_len;
 +                
 +                cand = kmalloc(sizeof(*cand), GFP_ATOMIC);
 +                if (cand) {
@@ -1546,11 +1553,12 @@ index 000000000..1703c14bb
 +    }
 +
 +    hash_for_each_rcu(hymo_merge_dirs, bkt, merge_entry, node) {
-+        size_t target_len = strlen(merge_entry->target);
++        size_t target_len, src_len, suffix_len;
++        target_len = strlen(merge_entry->target);
 +        if (strncmp(pathname, merge_entry->target, target_len) == 0) {
 +            if (pathname[target_len] == '/' || pathname[target_len] == '\0') {
-+                size_t src_len = strlen(merge_entry->src);
-+                size_t suffix_len = strlen(pathname) - target_len;
++                src_len = strlen(merge_entry->src);
++                suffix_len = strlen(pathname) - target_len;
 +                
 +                if (src_len + suffix_len + 1 > buflen) {
 +                    ret = -ENAMETOOLONG;
@@ -1831,17 +1839,17 @@ index 000000000..1703c14bb
 +    const char *dir_path;
 +};
 +
-+static bool hymo_merge_filldir(struct dir_context *ctx, const char *name, int namlen,
++static int hymo_merge_filldir(struct dir_context *ctx, const char *name, int namlen,
 +		      loff_t offset, u64 ino, unsigned int d_type)
 +{
 +    struct hymo_merge_ctx *mctx = container_of(ctx, struct hymo_merge_ctx, ctx);
 +    struct hymo_name_list *item;
 +
-+    if (namlen == 1 && name[0] == '.') return true;
-+    if (namlen == 2 && name[0] == '.' && name[1] == '.') return true;
++    if (namlen == 1 && name[0] == '.') return 0;
++    if (namlen == 2 && name[0] == '.' && name[1] == '.') return 0;
 +
 +    /* Skip .replace marker */
-+    if (namlen == 8 && strncmp(name, ".replace", 8) == 0) return true;
++    if (namlen == 8 && strncmp(name, ".replace", 8) == 0) return 0;
 +
 +    /* Check for whiteout (char dev 0:0) */
 +    if (d_type == DT_CHR) {
@@ -1855,7 +1863,7 @@ index 000000000..1703c14bb
 +                        /* It is a whiteout, skip injection */
 +                        path_put(&p);
 +                        kfree(path);
-+                        return true;
++                        return 0;
 +                    }
 +                }
 +                path_put(&p);
@@ -1869,7 +1877,7 @@ index 000000000..1703c14bb
 +        struct hymo_name_list *pos;
 +        list_for_each_entry(pos, mctx->head, list) {
 +            if (strlen(pos->name) == namlen && strncmp(pos->name, name, namlen) == 0) {
-+                return true; // Already exists
++                return 0; /* Already exists */
 +            }
 +        }
 +    }
@@ -1884,7 +1892,7 @@ index 000000000..1703c14bb
 +            kfree(item);
 +        }
 +    }
-+    return true;
++    return 0;
 +}
 +
 +int hymofs_populate_injected_list(const char *dir_path, struct dentry *parent, struct list_head *head)
@@ -2177,17 +2185,17 @@ index 000000000..1703c14bb
 +};
 +
 +/* Callback to add each filename to bloom filter */
-+static bool bloom_filldir(struct dir_context *ctx, const char *name, int namlen,
-+                          loff_t offset, u64 ino, unsigned int d_type)
++static int bloom_filldir(struct dir_context *ctx, const char *name, int namlen,
++                         loff_t offset, u64 ino, unsigned int d_type)
 +{
 +    struct bloom_fill_ctx *bctx = container_of(ctx, struct bloom_fill_ctx, ctx);
 +    /* Skip . and .. */
 +    if (namlen == 1 && name[0] == '.')
-+        return true;
++        return 0;
 +    if (namlen == 2 && name[0] == '.' && name[1] == '.')
-+        return true;
++        return 0;
 +    bloom_add(bctx->filter, name, namlen);
-+    return true;
++    return 0;
 +}
 +
 +void __hymofs_prepare_readdir(struct hymo_readdir_context *ctx, struct file *file)
@@ -2257,10 +2265,10 @@ index 000000000..1703c14bb
 +                /* Check for .replace marker in merge targets */
 +                if (!list_empty(&ctx->merge_targets)) {
 +                    struct hymo_merge_target_node *node;
++                    struct path path;
 +                    list_for_each_entry(node, &ctx->merge_targets, list) {
 +                        char *replace_path = kasprintf(GFP_KERNEL, "%s/.replace", node->target);
 +                        if (replace_path) {
-+                            struct path path;
 +                            if (kern_path(replace_path, LOOKUP_FOLLOW, &path) == 0) {
 +                                ctx->is_replace_mode = true;
 +                                hymo_log("replace mode enabled for %s (found %s)\n", ctx->dir_path, replace_path);
@@ -2379,13 +2387,13 @@ index 000000000..1703c14bb
 +
 +    /* Merge target check - files that exist in merge target should be hidden */
 +    if (ctx->has_merge_files) {
++        struct hymo_merge_target_node *node;
 +        /* Ultra fast path: Bloom filter says definitely not in merge target */
 +        if (!bloom_test(ctx->bloom_filter, name, namlen)) {
 +            return false;  /* O(1) skip - bloom filter negative */
 +        }
 +        
 +        /* Bloom filter positive - need to confirm with d_hash_and_lookup */
-+        struct hymo_merge_target_node *node;
 +        list_for_each_entry(node, &ctx->merge_targets, list) {
 +            /* Fast path: use cached dentry + d_hash_and_lookup */
 +            if (node->target_dentry) {
@@ -2666,8 +2674,8 @@ index 000000000..1703c14bb
 +                char *last_slash = strrchr(p, '/');
 +                if (last_slash) {
 +                    if (last_slash == p) {
-+                        /* Parent is root */
 +                        struct path parent_path;
++                        /* Parent is root */
 +                        if (kern_path("/", LOOKUP_FOLLOW, &parent_path) == 0) {
 +                            struct inode *inode = d_backing_inode(parent_path.dentry);
 +                            stat->uid = inode->i_uid;
@@ -2676,8 +2684,8 @@ index 000000000..1703c14bb
 +                            path_put(&parent_path);
 +                        }
 +                    } else {
-+                        *last_slash = '\0';
 +                        struct path parent_path;
++                        *last_slash = '\0';
 +                        if (kern_path(p, LOOKUP_FOLLOW, &parent_path) == 0) {
 +                            struct inode *inode = d_backing_inode(parent_path.dentry);
 +                            stat->uid = inode->i_uid;
