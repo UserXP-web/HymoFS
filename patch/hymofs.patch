@@ -237,10 +237,10 @@ index 16da4778c..2a07b7fd4 100644
  #endif
 diff --git a/fs/hymofs.c b/fs/hymofs.c
 new file mode 100644
-index 000000000..3d3d4bd41
+index 000000000..375a449ad
 --- /dev/null
 +++ b/fs/hymofs.c
-@@ -0,0 +1,2922 @@
+@@ -0,0 +1,2923 @@
 +#include <linux/string.h>
 +#include <linux/mm.h>
 +#include <linux/file.h>
@@ -1067,6 +1067,7 @@ index 000000000..3d3d4bd41
 +    if (cmd == HYMO_CMD_SET_MIRROR_PATH) {
 +        char *new_path = NULL;
 +        char *new_name = NULL;
++        char *slash;
 +        size_t len;
 +
 +        if (req.src) {
@@ -1084,7 +1085,7 @@ index 000000000..3d3d4bd41
 +            new_path[len - 1] = '\0';
 +        }
 +
-+        char *slash = strrchr(new_path, '/');
++        slash = strrchr(new_path, '/');
 +        if (slash) {
 +            new_name = kstrdup(slash + 1, GFP_KERNEL);
 +        } else {
