@@ -232,6 +232,13 @@ jobs:
           # Remove check_defconfig
           sed -i 's/check_defconfig//' ./common/build.config.gki
           echo "✅ 内核配置更新完成"
+
+      - name: "🧹 Clean kernel tree (mrproper) | 清理源码树"
+        if: ${{ env.KERNEL_VERSION == '6.6' }}
+        run: |
+          cd kernel_workspace/kernel_platform/common
+          make ARCH=arm64 O=out mrproper
+          echo "✅ mrproper 完成"
           
       - name: "🔨 Build Kernel | 编译内核"
         run: |
