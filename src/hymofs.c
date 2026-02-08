@@ -188,7 +188,7 @@ static DEFINE_SPINLOCK(hymo_merge_lock);      /* hymo_merge_dirs */
 static DEFINE_SPINLOCK(hymo_inject_lock);    /* hymo_inject_dirs */
 static bool hymo_allowlist_loaded = false;
 static DEFINE_MUTEX(hymo_allowlist_lock);
-bool hymofs_enabled = false;
+bool hymofs_enabled = true;
 EXPORT_SYMBOL(hymofs_enabled);
 
 /* Use HYMO_BLOOM_BITS from hymofs.h to avoid redefinition */
