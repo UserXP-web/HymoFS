@@ -289,10 +289,10 @@ index ae8f80895..07fdf8d60 100644
  
 diff --git a/fs/hymofs.c b/fs/hymofs.c
 new file mode 100644
-index 000000000..375a449ad
+index 000000000..1ab6496cf
 --- /dev/null
 +++ b/fs/hymofs.c
-@@ -0,0 +1,2923 @@
+@@ -0,0 +1,2922 @@
 +#include <linux/string.h>
 +#include <linux/mm.h>
 +#include <linux/file.h>
@@ -956,7 +956,6 @@ index 000000000..375a449ad
 +        strscpy(hymo_mirror_name_buf, HYMO_DEFAULT_MIRROR_NAME, NAME_MAX);
 +        hymo_current_mirror_path = hymo_mirror_path_buf;
 +        hymo_current_mirror_name = hymo_mirror_name_buf;
-+        hymofs_enabled = false;
 +        spin_unlock(&hymo_inject_lock);
 +        spin_unlock(&hymo_merge_lock);
 +        spin_unlock(&hymo_xattr_sbs_lock);
