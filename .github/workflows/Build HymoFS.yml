@@ -231,10 +231,9 @@ jobs:
           echo "✅ 内核配置更新完成"
           
       - name: "🧹 Clean kernel tree (mrproper) | 清理源码树"
-        if: ${{ env.KERNEL_VERSION == '6.6' }}
         run: |
           cd kernel_workspace/kernel_platform/common
-          make ARCH=arm64 O=out mrproper
+          make ARCH=arm64 mrproper O=out
           echo "✅ mrproper 完成"
 
       - name: "🔨 Build Kernel | 编译内核"
