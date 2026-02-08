@@ -284,7 +284,7 @@ index f5f972488..28705cd03 100644
  
 diff --git a/fs/hymofs.c b/fs/hymofs.c
 new file mode 100644
-index 000000000..1ab6496cf
+index 000000000..4812353bb
 --- /dev/null
 +++ b/fs/hymofs.c
 @@ -0,0 +1,2922 @@
@@ -478,7 +478,7 @@ index 000000000..1ab6496cf
 +static DEFINE_SPINLOCK(hymo_inject_lock);    /* hymo_inject_dirs */
 +static bool hymo_allowlist_loaded = false;
 +static DEFINE_MUTEX(hymo_allowlist_lock);
-+bool hymofs_enabled = false;
++bool hymofs_enabled = true;
 +EXPORT_SYMBOL(hymofs_enabled);
 +
 +/* Use HYMO_BLOOM_BITS from hymofs.h to avoid redefinition */
