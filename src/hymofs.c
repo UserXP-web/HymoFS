@@ -661,7 +661,6 @@ int hymo_dispatch_cmd(unsigned int cmd, void __user *arg) {
         strscpy(hymo_mirror_name_buf, HYMO_DEFAULT_MIRROR_NAME, NAME_MAX);
         hymo_current_mirror_path = hymo_mirror_path_buf;
         hymo_current_mirror_name = hymo_mirror_name_buf;
-        hymofs_enabled = false;
         spin_unlock(&hymo_inject_lock);
         spin_unlock(&hymo_merge_lock);
         spin_unlock(&hymo_xattr_sbs_lock);
