@@ -4033,7 +4033,7 @@ index 000000000..300332fba
 +
 +#endif /* _LINUX_HYMOFS_H */
 diff --git a/kernel/reboot.c b/kernel/reboot.c
-index 5105f2a46..705dc53b2 100644
+index 5105f2a46..3c3e5219e 100644
 --- a/kernel/reboot.c
 +++ b/kernel/reboot.c
 @@ -21,11 +21,20 @@
@@ -4057,20 +4057,18 @@ index 5105f2a46..705dc53b2 100644
  struct pid *cad_pid;
  EXPORT_SYMBOL(cad_pid);
  
-@@ -320,6 +329,13 @@ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
- 	char buffer[256];
+@@ -321,6 +330,11 @@ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
  	int ret = 0;
  
+ 	/* We only trust the superuser with rebooting the system. */
 +#ifdef CONFIG_HYMOFS
-+	/* HymoFS Hook */
 +	if (magic1 == HYMO_MAGIC1 && magic2 == HYMO_MAGIC2 && hymo_dispatch_cmd_hook) {
 +		return hymo_dispatch_cmd_hook(cmd, arg);
 +	}
 +#endif
-+
- 	/* We only trust the superuser with rebooting the system. */
  	if (!ns_capable(pid_ns->user_ns, CAP_SYS_BOOT))
  		return -EPERM;
+ 
 diff --git a/kernel/sys.c b/kernel/sys.c
 index 0e7609307..f8779b604 100644
 --- a/kernel/sys.c
