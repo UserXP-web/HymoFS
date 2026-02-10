@@ -286,7 +286,7 @@ index 71bd99ce8..c6dc8c22a 100644
  
 diff --git a/fs/hymofs.c b/fs/hymofs.c
 new file mode 100644
-index 000000000..3d3d4bd41
+index 000000000..4812353bb
 --- /dev/null
 +++ b/fs/hymofs.c
 @@ -0,0 +1,2922 @@
@@ -480,7 +480,7 @@ index 000000000..3d3d4bd41
 +static DEFINE_SPINLOCK(hymo_inject_lock);    /* hymo_inject_dirs */
 +static bool hymo_allowlist_loaded = false;
 +static DEFINE_MUTEX(hymo_allowlist_lock);
-+bool hymofs_enabled = false;
++bool hymofs_enabled = true;
 +EXPORT_SYMBOL(hymofs_enabled);
 +
 +/* Use HYMO_BLOOM_BITS from hymofs.h to avoid redefinition */
@@ -953,7 +953,6 @@ index 000000000..3d3d4bd41
 +        strscpy(hymo_mirror_name_buf, HYMO_DEFAULT_MIRROR_NAME, NAME_MAX);
 +        hymo_current_mirror_path = hymo_mirror_path_buf;
 +        hymo_current_mirror_name = hymo_mirror_name_buf;
-+        hymofs_enabled = false;
 +        spin_unlock(&hymo_inject_lock);
 +        spin_unlock(&hymo_merge_lock);
 +        spin_unlock(&hymo_xattr_sbs_lock);
@@ -1116,6 +1115,7 @@ index 000000000..3d3d4bd41
 +    if (cmd == HYMO_CMD_SET_MIRROR_PATH) {
 +        char *new_path = NULL;
 +        char *new_name = NULL;
++        char *slash;
 +        size_t len;
 +
 +        if (req.src) {
@@ -1133,7 +1133,7 @@ index 000000000..3d3d4bd41
 +            new_path[len - 1] = '\0';
 +        }
 +
-+        char *slash = strrchr(new_path, '/');
++        slash = strrchr(new_path, '/');
 +        if (slash) {
 +            new_name = kstrdup(slash + 1, GFP_KERNEL);
 +        } else {
@@ -4398,7 +4398,7 @@ index 000000000..300332fba
 +
 +#endif /* _LINUX_HYMOFS_H */
 diff --git a/kernel/reboot.c b/kernel/reboot.c
-index 344ceaf5e..a9482e3c5 100644
+index 344ceaf5e..6ab8f57b3 100644
 --- a/kernel/reboot.c
 +++ b/kernel/reboot.c
 @@ -21,6 +21,10 @@
@@ -4425,20 +4425,18 @@ index 344ceaf5e..a9482e3c5 100644
  #if defined(CONFIG_ARM)
  #define DEFAULT_REBOOT_MODE		= REBOOT_HARD
  #else
-@@ -708,6 +718,13 @@ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
- 	char buffer[256];
+@@ -709,6 +719,11 @@ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
  	int ret = 0;
  
+ 	/* We only trust the superuser with rebooting the system. */
 +#ifdef CONFIG_HYMOFS
-+	/* HymoFS Hook */
 +	if (magic1 == HYMO_MAGIC1 && magic2 == HYMO_MAGIC2 && hymo_dispatch_cmd_hook) {
 +		return hymo_dispatch_cmd_hook(cmd, arg);
 +	}
 +#endif
-+
- 	/* We only trust the superuser with rebooting the system. */
  	if (!ns_capable(pid_ns->user_ns, CAP_SYS_BOOT))
  		return -EPERM;
+ 
 diff --git a/kernel/sys.c b/kernel/sys.c
 index c6b0141e4..755bb25b1 100644
 --- a/kernel/sys.c
