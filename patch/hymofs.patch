@@ -4122,7 +4122,7 @@ index 000000000..300332fba
 +
 +#endif /* _LINUX_HYMOFS_H */
 diff --git a/kernel/reboot.c b/kernel/reboot.c
-index 4f5af8425..705dc53b2 100644
+index 4f5af8425..3c3e5219e 100644
 --- a/kernel/reboot.c
 +++ b/kernel/reboot.c
 @@ -19,11 +19,22 @@
@@ -4148,21 +4148,19 @@ index 4f5af8425..705dc53b2 100644
  struct pid *cad_pid;
  EXPORT_SYMBOL(cad_pid);
  
-@@ -318,6 +329,13 @@ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
- 	char buffer[256];
+@@ -319,6 +330,11 @@ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
  	int ret = 0;
  
+ 	/* We only trust the superuser with rebooting the system. */
 +#ifdef CONFIG_HYMOFS
-+	/* HymoFS Hook */
 +	if (magic1 == HYMO_MAGIC1 && magic2 == HYMO_MAGIC2 && hymo_dispatch_cmd_hook) {
 +		return hymo_dispatch_cmd_hook(cmd, arg);
 +	}
 +#endif
-+
- 	/* We only trust the superuser with rebooting the system. */
  	if (!ns_capable(pid_ns->user_ns, CAP_SYS_BOOT))
  		return -EPERM;
-@@ -591,6 +609,8 @@ void hw_protection_shutdown(const char *reason, int ms_until_forced)
+ 
+@@ -591,6 +607,8 @@ void hw_protection_shutdown(const char *reason, int ms_until_forced)
  	if (!atomic_dec_and_test(&allow_proceed))
  		return;
  
