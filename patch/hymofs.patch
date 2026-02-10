@@ -3802,7 +3802,7 @@ index 000000000..300332fba
 +
 +#endif /* _LINUX_HYMOFS_H */
 diff --git a/kernel/reboot.c b/kernel/reboot.c
-index c1df842fb..846f9d0d9 100644
+index c1df842fb..23f3f93f9 100644
 --- a/kernel/reboot.c
 +++ b/kernel/reboot.c
 @@ -17,6 +17,9 @@
@@ -3826,21 +3826,17 @@ index c1df842fb..846f9d0d9 100644
  enum reboot_mode panic_reboot_mode = REBOOT_UNDEFINED;
  EXPORT_SYMBOL_GPL(panic_reboot_mode);
  
-@@ -326,8 +333,13 @@ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
- 			(magic2 != LINUX_REBOOT_MAGIC2 &&
- 			magic2 != LINUX_REBOOT_MAGIC2A &&
- 			magic2 != LINUX_REBOOT_MAGIC2B &&
--			magic2 != LINUX_REBOOT_MAGIC2C))
-+			magic2 != LINUX_REBOOT_MAGIC2C)) {
-+#ifdef CONFIG_HYMOFS
-+		if (magic1 == HYMO_MAGIC1 && magic2 == HYMO_MAGIC2 && hymo_dispatch_cmd_hook)
-+			return hymo_dispatch_cmd_hook(cmd, arg);
-+#endif
- 		return -EINVAL;
-+	}
+@@ -318,6 +325,10 @@ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
+ 	int ret = 0;
  
- 	/*
- 	 * If pid namespaces are enabled and the current task is in a child
+ 	/* We only trust the superuser with rebooting the system. */
++#ifdef CONFIG_HYMOFS
++	if (magic1 == HYMO_MAGIC1 && magic2 == HYMO_MAGIC2 && hymo_dispatch_cmd_hook)
++		return hymo_dispatch_cmd_hook(cmd, arg);
++#endif
+ 	if (!ns_capable(pid_ns->user_ns, CAP_SYS_BOOT))
+ 		return -EPERM;
+ 
 diff --git a/kernel/sys.c b/kernel/sys.c
 index 4e9627616..8ff2993a9 100644
 --- a/kernel/sys.c
