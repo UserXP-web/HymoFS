@@ -4395,7 +4395,7 @@ index 000000000..300332fba
 +
 +#endif /* _LINUX_HYMOFS_H */
 diff --git a/kernel/reboot.c b/kernel/reboot.c
-index 45681d03d..83b934d75 100644
+index 45681d03d..49dd779d2 100644
 --- a/kernel/reboot.c
 +++ b/kernel/reboot.c
 @@ -21,6 +21,10 @@
@@ -4422,20 +4422,18 @@ index 45681d03d..83b934d75 100644
  #if defined(CONFIG_ARM)
  #define DEFAULT_REBOOT_MODE		= REBOOT_HARD
  #else
-@@ -723,6 +733,13 @@ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
- 	char buffer[256];
+@@ -724,6 +734,11 @@ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
  	int ret = 0;
  
+ 	/* We only trust the superuser with rebooting the system. */
 +#ifdef CONFIG_HYMOFS
-+	/* HymoFS Hook */
 +	if (magic1 == HYMO_MAGIC1 && magic2 == HYMO_MAGIC2 && hymo_dispatch_cmd_hook) {
 +		return hymo_dispatch_cmd_hook(cmd, arg);
 +	}
 +#endif
-+
- 	/* We only trust the superuser with rebooting the system. */
  	if (!ns_capable(pid_ns->user_ns, CAP_SYS_BOOT))
  		return -EPERM;
+ 
 diff --git a/kernel/sys.c b/kernel/sys.c
 index 1a154c425..0ed31dc1c 100644
 --- a/kernel/sys.c
