@@ -82,7 +82,7 @@ jobs:
           make -C "$KERNEL_SRC" ARCH=arm64 LLVM=1 modules_prepare
 
           echo "Building hymofs_lkm.ko..."
-          make -C "$KERNEL_SRC" ARCH=arm64 LLVM=1 M="$SRC" modules
+          make -C "$KERNEL_SRC" ARCH=arm64 LLVM=1 M="$SRC" KBUILD_MODPOST_WARN=1 modules
           ls -la "$SRC"/hymofs_lkm.ko
           llvm-strip -d "$SRC"/hymofs_lkm.ko
 
