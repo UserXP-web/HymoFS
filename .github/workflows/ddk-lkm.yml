@@ -31,6 +31,16 @@ jobs:
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate version
+        id: parse_version
+        run: |
+          COMMIT_NUM=$(git rev-list --count HEAD)
+          VERSION=$(echo "$COMMIT_NUM + 200" | bc)
+          echo "Generated Version: $VERSION"
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
 
       - name: Install build dependencies
         run: |
@@ -111,10 +121,44 @@ jobs:
 
           ls -la "$OUT"
 
-      - name: Upload hymofs_lkm.ko artifact
+      - name: Upload raw .ko
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ inputs.kmi }}-hymofs-lkm
-          path: |
-            out/${{ inputs.kmi }}_hymofs_lkm.ko
-            out/${{ inputs.kmi }}_hymofs_lkm_magisk.zip
+          name: ${{ inputs.kmi }}_hymofs_lkm.ko
+          path: out/${{ inputs.kmi }}_hymofs_lkm.ko
+
+      - name: Upload Magisk module zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.kmi }}_hymofs_lkm_magisk
+          path: out/${{ inputs.kmi }}_hymofs_lkm_magisk.zip
+
+      - name: Post to Telegram
+        if: ${{ github.event_name != 'pull_request' }}
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          SESSION_STRING: ${{ secrets.SESSION_STRING }}
+          CHAT_ID: ${{ vars.CHAT_ID }}
+          MESSAGE_THREAD_ID: ${{ vars.MESSAGE_THREAD_ID }}
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+          COMMIT_URL: ${{ github.event.head_commit.url }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TITLE: "HymoFS LKM (${{ inputs.kmi }})"
+          VERSION: ${{ steps.parse_version.outputs.VERSION }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          if [ -z "$BOT_TOKEN" ] || [ -z "$CHAT_ID" ]; then
+            echo "BOT_TOKEN/CHAT_ID not set, skipping."
+            exit 0
+          fi
+          pip install telethon==1.34.0
+          KO="out/${{ inputs.kmi }}_hymofs_lkm.ko"
+          ZIP="out/${{ inputs.kmi }}_hymofs_lkm_magisk.zip"
+          FILES=""
+          [ -f "$KO" ] && FILES="$KO"
+          [ -f "$ZIP" ] && FILES="$FILES $ZIP"
+          if [ -n "$FILES" ]; then
+            python3 scripts/hymobot.py $FILES
+          else
+            echo "No files to upload"
+          fi
