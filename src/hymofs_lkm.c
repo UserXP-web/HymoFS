@@ -18,7 +18,7 @@
 #endif
 
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("HymoFS");
+MODULE_AUTHOR("Anatdx");
 MODULE_DESCRIPTION("HymoFS ftrace-based LKM skeleton");
 MODULE_VERSION("0.0.1");
 

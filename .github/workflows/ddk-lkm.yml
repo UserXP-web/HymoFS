@@ -86,8 +86,49 @@ jobs:
           ls -la "$SRC"/hymofs_lkm.ko
           llvm-strip -d "$SRC"/hymofs_lkm.ko
 
+      - name: Package minimal Magisk module
+        run: |
+          set -euo pipefail
+          KMI="${{ inputs.kmi }}"
+          SRC="$GITHUB_WORKSPACE/src"
+          OUT="$GITHUB_WORKSPACE/out"
+          MODDIR="$OUT/hymofs_lkm_magisk"
+          TEMPLATE_DIR="$GITHUB_WORKSPACE/module"
+
+          if [ ! -f "$TEMPLATE_DIR/module.prop" ] || [ ! -f "$TEMPLATE_DIR/post-fs-data.sh" ]; then
+            echo "Module template is missing under $TEMPLATE_DIR"
+            exit 1
+          fi
+
+          mkdir -p "$OUT"
+          rm -rf "$MODDIR"
+          cp -a "$TEMPLATE_DIR" "$MODDIR"
+          cp "$SRC/hymofs_lkm.ko" "$OUT/${KMI}_hymofs_lkm.ko"
+          cp "$SRC/hymofs_lkm.ko" "$MODDIR/hymofs_lkm.ko"
+          chmod 0755 "$MODDIR/post-fs-data.sh"
+
+          export OUT MODDIR KMI
+          python3 - <<'PY'
+import os, zipfile
+out = os.environ["OUT"]
+moddir = os.environ["MODDIR"]
+kmi = os.environ["KMI"]
+zip_path = os.path.join(out, f"{kmi}_hymofs_lkm_magisk.zip")
+with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+    for root, _, files in os.walk(moddir):
+        for fn in files:
+            full = os.path.join(root, fn)
+            arc = os.path.relpath(full, moddir)
+            zf.write(full, arcname=arc)
+print(zip_path)
+PY
+
+          ls -la "$OUT"
+
       - name: Upload hymofs_lkm.ko artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ inputs.kmi }}-hymofs-lkm
-          path: src/hymofs_lkm.ko
+          path: |
+            out/${{ inputs.kmi }}_hymofs_lkm.ko
+            out/${{ inputs.kmi }}_hymofs_lkm_magisk.zip

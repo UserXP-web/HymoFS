@@ -1,0 +1,6 @@
+id=hymofs_lkm
+name=HymoFS LKM
+version=0.0.1
+versionCode=1
+author=Anatdx
+description=Load hymofs_lkm.ko in post-fs-data.
