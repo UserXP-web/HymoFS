@@ -1,6 +1,9 @@
 name: Build LKM (HymoFS)
 
 on:
+  push:
+    branches:
+      - lkm
   workflow_call:
   workflow_dispatch:
 
