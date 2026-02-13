@@ -136,10 +136,9 @@ jobs:
       - name: Post to Telegram
         if: ${{ github.event_name != 'pull_request' }}
         env:
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          SESSION_STRING: ${{ secrets.SESSION_STRING }}
-          CHAT_ID: ${{ vars.CHAT_ID }}
-          MESSAGE_THREAD_ID: ${{ vars.MESSAGE_THREAD_ID }}
+          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN}}
+          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          MESSAGE_THREAD_ID: ${{ secrets.KPM_MESSAGE_THREAD_ID }}
           COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
           COMMIT_URL: ${{ github.event.head_commit.url }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

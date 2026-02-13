@@ -1536,114 +1536,42 @@ static int (*orig_iterate_dir)(struct file *, struct dir_context *);
  * Part 19: Hook - getname_flags (Forward Path Redirection)
  * ====================================================================== */
 
-static struct filename *hymofs_process_getname(struct filename *result)
+static struct filename *hook_getname_flags(const char __user *filename,
+					   int flags, int *empty)
 {
+	struct filename *result;
 	char *target;
-	bool is_absolute;
 
+	result = orig_getname_flags(filename, flags, empty);
+
+	/* Ultra-fast bailout: no rules at all */
+	if (likely(!hymofs_enabled))
+		return result;
+	if (likely(atomic_read(&hymo_rule_count) == 0 &&
+		   atomic_read(&hymo_hide_count) == 0))
+		return result;
 	if (IS_ERR(result))
 		return result;
-	if (!hymofs_enabled)
-		return result;
-	if (likely(hash_empty(hymo_paths) &&
-		   hash_empty(hymo_hide_paths) &&
-		   hash_empty(hymo_merge_dirs)))
+
+	/* Daemon never gets intercepted */
+	if (hymo_daemon_pid > 0 &&
+	    task_tgid_vnr(current) == hymo_daemon_pid)
 		return result;
 
-	is_absolute = (result->name[0] == '/');
+	/* Only process absolute paths - relative path resolution is too
+	 * expensive for the hot path (2x PAGE_SIZE alloc + d_path).
+	 * Userspace daemon should always pass absolute paths. */
+	if (result->name[0] != '/')
+		return result;
 
-	/* Check hide rules */
-	if (hymofs_should_hide(result->name)) {
+	/* Check hide rules (bloom filter fast-path inside) */
+	if (unlikely(atomic_read(&hymo_hide_count) > 0) &&
+	    hymofs_should_hide(result->name)) {
 		putname(result);
 		return ERR_PTR(-ENOENT);
 	}
 
-	/* Try forward redirect for absolute paths */
-	if (is_absolute) {
-		target = hymofs_resolve_target(result->name);
-		if (target) {
-			putname(result);
-			result = getname_kernel(target);
-			kfree(target);
-		}
-		return result;
-	}
-
-	/* Relative path: build absolute path from CWD and try redirect */
-	{
-		char *buf = NULL;
-		struct path pwd;
-		char *cwd;
-		int cwd_len, name_len;
-		const char *name = result->name;
-
-		if (name[0] == '.' && name[1] == '/')
-			name += 2;
-
-		rcu_read_lock();
-		pwd = current->fs->pwd;
-		path_get(&pwd);
-		rcu_read_unlock();
-
-		buf = kmalloc(PAGE_SIZE, GFP_KERNEL);
-		if (!buf) {
-			path_put(&pwd);
-			goto try_direct;
-		}
-
-		cwd = d_path(&pwd, buf, PAGE_SIZE);
-		path_put(&pwd);
-
-		if (IS_ERR(cwd)) {
-			kfree(buf);
-			goto try_direct;
-		}
-
-		/*
-		 * In LKM context, d_path called from our module returns the
-		 * physical path. Apply reverse lookup to get virtual CWD.
-		 */
-		{
-			char *vbuf = kmalloc(PAGE_SIZE, GFP_KERNEL);
-			if (vbuf) {
-				int r = hymofs_reverse_lookup(cwd, vbuf, PAGE_SIZE);
-				if (r > 0) {
-					memmove(buf, vbuf, r + 1);
-					cwd = buf;
-				}
-				kfree(vbuf);
-			}
-		}
-
-		cwd_len = strlen(cwd);
-		name_len = strlen(name);
-
-		if (cwd != buf)
-			memmove(buf, cwd, cwd_len + 1);
-		cwd = buf;
-
-		if (cwd_len + 1 + name_len < PAGE_SIZE) {
-			if (cwd_len > 0 && cwd[cwd_len - 1] != '/') {
-				cwd[cwd_len++] = '/';
-				cwd[cwd_len] = '\0';
-			}
-			memcpy(cwd + cwd_len, name, name_len + 1);
-			target = hymofs_resolve_target(cwd);
-		} else {
-			target = NULL;
-		}
-
-		kfree(buf);
-
-		if (target) {
-			putname(result);
-			result = getname_kernel(target);
-			kfree(target);
-			return result;
-		}
-	}
-
-try_direct:
+	/* Try forward redirect */
 	target = hymofs_resolve_target(result->name);
 	if (target) {
 		putname(result);
@@ -1653,105 +1581,78 @@ try_direct:
 	return result;
 }
 
-static struct filename *hook_getname_flags(const char __user *filename,
-					   int flags, int *empty)
-{
-	struct filename *result = orig_getname_flags(filename, flags, empty);
-
-	return hymofs_process_getname(result);
-}
-
 /* ======================================================================
  * Part 20: Hook - vfs_getattr (Stat Spoofing)
  * ====================================================================== */
+
+/*
+ * Fast path check: skip common system paths that never have HymoFS rules.
+ * Uses dentry name for O(1) prefix check - no path allocation needed.
+ */
+static inline bool hymofs_needs_stat_check(const struct path *path)
+{
+	const char *name;
+
+	if (!path || !path->dentry)
+		return false;
+
+	name = path->dentry->d_name.name;
+
+	/* Skip /dev, /proc, /sys - never have hymofs rules */
+	if (name[0] == 'd' && !strncmp(name, "dev", 3))
+		return false;
+	if (name[0] == 'p' && !strncmp(name, "proc", 4))
+		return false;
+	if (name[0] == 's' && !strncmp(name, "sys", 3))
+		return false;
+
+	return true;
+}
 
 static int hook_vfs_getattr(const struct path *path, struct kstat *stat,
 			    u32 request_mask, unsigned int query_flags)
 {
 	int ret;
-	char *buf, *p;
 
 	ret = orig_vfs_getattr(path, stat, request_mask, query_flags);
-	if (ret != 0)
+
+	/* Ultra-fast bailout chain */
+	if (likely(ret != 0 || !hymofs_enabled || !hymo_stealth_enabled))
+		return ret;
+	if (likely(atomic_read(&hymo_rule_count) == 0))
+		return ret;
+	if (!hymofs_needs_stat_check(path))
 		return ret;
 
-	if (!hymofs_enabled || !hymo_stealth_enabled)
+	/* Root/daemon: no spoofing needed */
+	if (unlikely(uid_eq(current_uid(), GLOBAL_ROOT_UID)))
 		return ret;
-
-	/* Fast path: no rules loaded */
-	if (likely(hash_empty(hymo_paths) && hash_empty(hymo_targets) &&
-		   hash_empty(hymo_inject_dirs)))
+	if (hymo_daemon_pid > 0 &&
+	    task_tgid_vnr(current) == hymo_daemon_pid)
 		return ret;
 
 	/*
-	 * Get the physical path. Since we're called from our module context,
-	 * d_path skips our hook and returns the real filesystem path.
+	 * Only check inode bits - NO path allocation needed.
+	 * Inode bits are set when rules are added (ADD_RULE / HIDE_RULE).
 	 */
-	buf = kmalloc(PAGE_SIZE, GFP_KERNEL);
-	if (!buf)
-		return ret;
+	if (path->dentry && d_inode(path->dentry)) {
+		struct inode *inode = d_inode(path->dentry);
 
-	p = d_path(path, buf, PAGE_SIZE);
-	if (!IS_ERR(p)) {
-		bool is_injected = false;
-		char *virtual_buf;
-
-		/* Check reverse lookup: if this is a merge target, get virtual path */
-		virtual_buf = kmalloc(PAGE_SIZE, GFP_KERNEL);
-		if (virtual_buf) {
-			if (hymofs_reverse_lookup(p, virtual_buf, PAGE_SIZE) > 0) {
-				p = virtual_buf;
-				is_injected = true;
-			}
-		}
-
-		/* Spoof attributes for injected files */
-		if (is_injected) {
-			char *last_slash = strrchr(p, '/');
-			if (last_slash) {
-				struct path parent_path;
-				if (last_slash == p) {
-					if (kern_path("/", LOOKUP_FOLLOW, &parent_path) == 0) {
-						struct inode *inode = d_backing_inode(parent_path.dentry);
-						stat->uid = inode->i_uid;
-						stat->gid = inode->i_gid;
-						stat->dev = inode->i_sb->s_dev;
-						path_put(&parent_path);
-					}
-				} else {
-					char saved = *last_slash;
-					*last_slash = '\0';
-					if (kern_path(p, LOOKUP_FOLLOW, &parent_path) == 0) {
-						struct inode *inode = d_backing_inode(parent_path.dentry);
-						stat->uid = inode->i_uid;
-						stat->gid = inode->i_gid;
-						stat->dev = inode->i_sb->s_dev;
-						path_put(&parent_path);
-					}
-					*last_slash = saved;
-				}
-			}
+		/* Fast inode-bit check: was this file replaced/injected? */
+		if (inode->i_mapping &&
+		    test_bit(AS_FLAGS_HYMO_HIDE, &inode->i_mapping->flags)) {
 			stat->ino ^= 0x48594D4F;
 		}
 
-		/* Spoof mtime for injected directories */
-		if (hymofs_should_spoof_mtime(p)) {
+		/* Spoof mtime only for directories with injected content */
+		if (S_ISDIR(inode->i_mode) && inode->i_mapping &&
+		    test_bit(AS_FLAGS_HYMO_DIR_HAS_HIDDEN,
+			     &inode->i_mapping->flags)) {
 			ktime_get_real_ts64(&stat->mtime);
 			stat->ctime = stat->mtime;
 		}
-
-		/* Inode obfuscation for replaced paths */
-		if (hymofs_should_replace(p)) {
-			stat->ino ^= 0x48594D4F;
-			if (strncmp(p, "/system/", 8) == 0) {
-				stat->uid = KUIDT_INIT(0);
-				stat->gid = KGIDT_INIT(0);
-			}
-		}
-
-		kfree(virtual_buf);
 	}
-	kfree(buf);
+
 	return ret;
 }
 
@@ -1762,28 +1663,35 @@ static int hook_vfs_getattr(const struct path *path, struct kstat *stat,
 static char *hook_d_path(const struct path *path, char *buf, int bufsize)
 {
 	char *res = orig_d_path(path, buf, bufsize);
-	char *temp;
-	int len;
 
-	if (!hymofs_enabled)
-		return res;
-	if (likely(hash_empty(hymo_targets) && hash_empty(hymo_merge_dirs)))
+	/* Ultra-fast bailout: no rules -> no reverse mapping needed */
+	if (likely(!hymofs_enabled || atomic_read(&hymo_rule_count) == 0))
 		return res;
 	if (IS_ERR(res))
 		return res;
 
-	temp = kmalloc(bufsize, GFP_KERNEL);
-	if (!temp)
+	/* Root/daemon: show real paths */
+	if (unlikely(uid_eq(current_uid(), GLOBAL_ROOT_UID)))
+		return res;
+	if (hymo_daemon_pid > 0 &&
+	    task_tgid_vnr(current) == hymo_daemon_pid)
 		return res;
 
-	if (hymofs_reverse_lookup(res, temp, bufsize) > 0) {
-		len = strlen(temp);
-		if (len < bufsize) {
-			memcpy(buf, temp, len + 1);
-			res = buf;
+	/* Only allocate if we actually have targets/merge rules */
+	if (likely(hash_empty(hymo_targets) && hash_empty(hymo_merge_dirs)))
+		return res;
+
+	{
+		char *temp = kmalloc(bufsize, GFP_KERNEL);
+		if (temp) {
+			int len = hymofs_reverse_lookup(res, temp, bufsize);
+			if (len > 0 && len < bufsize) {
+				memcpy(buf, temp, len + 1);
+				res = buf;
+			}
+			kfree(temp);
 		}
 	}
-	kfree(temp);
 	return res;
 }
 
@@ -1798,105 +1706,104 @@ hymofs_filldir_filter(struct dir_context *ctx, const char *name,
 	struct hymofs_filldir_wrapper *w =
 		container_of(ctx, struct hymofs_filldir_wrapper, wrap_ctx);
 
-	/* Root and daemon see everything */
-	if (uid_eq(current_uid(), GLOBAL_ROOT_UID))
-		goto passthrough;
-	{
-		pid_t pid = task_tgid_vnr(current);
-		if (hymo_daemon_pid > 0 && pid == hymo_daemon_pid)
-			goto passthrough;
-	}
-
-	/* Skip . and .. */
+	/* Skip . and .. immediately - most common entries */
 	if (unlikely(namlen <= 2 && name[0] == '.')) {
 		if (namlen == 1 || (namlen == 2 && name[1] == '.'))
 			goto passthrough;
 	}
 
-	/* Stealth: hide mirror device in /dev */
-	if (hymo_stealth_enabled && w->dir_path) {
-		if (w->dir_path_len == 4 && strcmp(w->dir_path, "/dev") == 0) {
-			size_t mlen = strlen(hymo_current_mirror_name);
-			if (namlen == mlen &&
-			    memcmp(name, hymo_current_mirror_name, namlen) == 0)
-				return HYMO_FILLDIR_CONTINUE; /* hide */
-		}
+	/* Stealth: hide mirror device in /dev (cheap string compare) */
+	if (hymo_stealth_enabled && w->dir_path_len == 4) {
+		size_t mlen = strlen(hymo_current_mirror_name);
+		if ((unsigned int)namlen == mlen &&
+		    memcmp(name, hymo_current_mirror_name, namlen) == 0)
+			return HYMO_FILLDIR_CONTINUE;
 	}
 
-	/* Check inode marking for hidden entries */
-	if (w->dir_has_hidden && !hymo_is_privileged_process() &&
-	    hymo_should_apply_hide_rules() && w->orig_ctx) {
-		/*
-		 * We can't easily access the parent file's dentry from here.
-		 * Fall back to path-based hide check.
-		 */
-		if (w->dir_path) {
-			char *full = kasprintf(GFP_ATOMIC, "%s/%.*s",
-					       w->dir_path, namlen, name);
-			if (full) {
-				bool hide = hymofs_should_hide(full);
-				kfree(full);
-				if (hide)
-					return HYMO_FILLDIR_CONTINUE;
+	/*
+	 * Hide check using dcache lookup (from original hymofs.c):
+	 * O(1) d_hash_and_lookup on parent dentry -> check inode bit.
+	 * NO string allocation, NO path building, NO hash table walk.
+	 */
+	if (w->dir_has_hidden && w->parent_dentry) {
+		struct dentry *child;
+
+		child = d_hash_and_lookup(w->parent_dentry,
+				&(struct qstr)QSTR_INIT(name, namlen));
+		if (child) {
+			struct inode *cinode = d_inode(child);
+			if (cinode && cinode->i_mapping &&
+			    test_bit(AS_FLAGS_HYMO_HIDE,
+				     &cinode->i_mapping->flags)) {
+				dput(child);
+				return HYMO_FILLDIR_CONTINUE;
 			}
+			dput(child);
 		}
 	}
 
 passthrough:
-	/* Forward to original filldir */
 	return w->orig_ctx->actor(w->orig_ctx, name, namlen, offset, ino, d_type);
 }
 
 static int hook_iterate_dir(struct file *file, struct dir_context *ctx)
 {
 	struct hymofs_filldir_wrapper wrapper;
-	char *buf;
+	struct inode *dir_inode;
 	int ret;
 
-	if (!hymofs_enabled)
+	/* Ultra-fast bailout */
+	if (likely(!hymofs_enabled))
+		return orig_iterate_dir(file, ctx);
+	if (likely(atomic_read(&hymo_rule_count) == 0 &&
+		   atomic_read(&hymo_hide_count) == 0))
 		return orig_iterate_dir(file, ctx);
 
-	/* Fast path: no rules at all */
-	if (likely(hash_empty(hymo_paths) && hash_empty(hymo_hide_paths) &&
-		   hash_empty(hymo_merge_dirs) && hash_empty(hymo_inject_dirs)))
+	/* Root/daemon: no filtering */
+	if (unlikely(uid_eq(current_uid(), GLOBAL_ROOT_UID)))
+		return orig_iterate_dir(file, ctx);
+	if (hymo_daemon_pid > 0 &&
+	    task_tgid_vnr(current) == hymo_daemon_pid)
 		return orig_iterate_dir(file, ctx);
 
-	/* Get directory path (physical, since we're in our module) */
-	buf = (char *)__get_free_page(GFP_KERNEL);
+	/* Check inode bit first */
+	wrapper.dir_has_hidden = false;
+	wrapper.parent_dentry = NULL;
 	wrapper.dir_path = NULL;
 	wrapper.dir_path_len = 0;
-	wrapper.dir_has_hidden = false;
 
-	if (buf && file && file->f_path.dentry) {
-		char *p = d_path(&file->f_path, buf, PAGE_SIZE);
-		if (!IS_ERR(p)) {
-			int len = strlen(p);
-			memmove(buf, p, len + 1);
-			wrapper.dir_path = buf;
-			wrapper.dir_path_len = len;
-		}
+	if (file && file->f_path.dentry) {
+		dir_inode = d_inode(file->f_path.dentry);
+		if (dir_inode && dir_inode->i_mapping)
+			wrapper.dir_has_hidden = test_bit(
+				AS_FLAGS_HYMO_DIR_HAS_HIDDEN,
+				&dir_inode->i_mapping->flags);
+		wrapper.parent_dentry = file->f_path.dentry;
+	}
 
-		/* Check if directory has hidden entries (inode bit) */
-		if (file->f_path.dentry) {
-			struct inode *dir_inode = d_inode(file->f_path.dentry);
-			if (dir_inode && dir_inode->i_mapping)
-				wrapper.dir_has_hidden = test_bit(
-					AS_FLAGS_HYMO_DIR_HAS_HIDDEN,
-					&dir_inode->i_mapping->flags);
+	/* If nothing to hide and stealth not relevant, skip entirely */
+	if (likely(!wrapper.dir_has_hidden && !hymo_stealth_enabled))
+		return orig_iterate_dir(file, ctx);
+
+	/*
+	 * For stealth /dev check, we need dir_path_len.
+	 * Use d_path only for stealth; hide check uses dcache (no path needed).
+	 */
+	if (hymo_stealth_enabled && wrapper.parent_dentry) {
+		const char *dname = wrapper.parent_dentry->d_name.name;
+		/* Quick check: is this /dev? (top-level "dev" dentry) */
+		if (dname[0] == 'd' && dname[1] == 'e' && dname[2] == 'v' &&
+		    dname[3] == '\0') {
+			wrapper.dir_path_len = 4; /* signal "/dev" to filldir */
 		}
 	}
 
-	/* Set up filtering wrapper */
 	wrapper.wrap_ctx.actor = hymofs_filldir_filter;
 	wrapper.wrap_ctx.pos = ctx->pos;
 	wrapper.orig_ctx = ctx;
 
 	ret = orig_iterate_dir(file, &wrapper.wrap_ctx);
-
 	ctx->pos = wrapper.wrap_ctx.pos;
-
-	if (buf)
-		free_page((unsigned long)buf);
 
 	return ret;
 }
