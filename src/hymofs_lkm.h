@@ -201,4 +201,7 @@ struct hymofs_filldir_wrapper {
 /* debug flag - defined in hymofs_lkm.c */
 extern bool hymo_debug_enabled;
 
+/* Called by syscall handler (e.g. KP) when userspace requests HYMO_CMD_GET_FD. Returns anon fd or negative errno. */
+int hymofs_get_anon_fd(void);
+
 #endif /* _HYMOFS_LKM_H */

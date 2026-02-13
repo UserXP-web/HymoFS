@@ -3,8 +3,8 @@
  * HymoFS LKM - Loadable Kernel Module for filesystem path manipulation.
  *
  * Uses ftrace hooks on key VFS functions to intercept path resolution,
- * stat, directory listing, and d_path. Provides a miscdevice (/dev/hymofs)
- * for userspace communication via ioctl.
+ * stat, directory listing, and d_path. No device node: anon fd is obtained
+ * via syscall (HYMO_CMD_GET_FD). Syscall handler (e.g. KP) calls hymofs_get_anon_fd().
  *
  * Hooks:
  *   getname_flags  - forward path redirection (open/stat/access/...)
@@ -29,7 +29,6 @@
 #include <linux/namei.h>
 #include <linux/path.h>
 #include <linux/uaccess.h>
-#include <linux/miscdevice.h>
 #include <linux/cred.h>
 #include <linux/uidgid.h>
 #include <linux/sched/task.h>
@@ -37,6 +36,8 @@
 #include <linux/dirent.h>
 #include <linux/stat.h>
 #include <linux/time.h>
+#include <linux/anon_inodes.h>
+#include <linux/fcntl.h>
 
 #include "hymofs_lkm.h"
 
@@ -946,6 +947,8 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 	bool found = false;
 	int ret = 0;
 
+	/* GET_FD is not handled here: anon fd is obtained via syscall -> hymofs_get_anon_fd() */
+
 	if (cmd == HYMO_CMD_CLEAR_ALL) {
 		spin_lock(&hymo_cfg_lock);
 		spin_lock(&hymo_rules_lock);
@@ -1543,38 +1546,39 @@ static long hymofs_dev_ioctl(struct file *file, unsigned int cmd,
 }
 
 /* ======================================================================
- * Part 17: Miscdevice
+ * Part 17: Anonymous fd (no device node; syscall returns this fd)
  * ====================================================================== */
 
-static int hymofs_dev_open(struct inode *inode, struct file *file)
-{
-	pid_t pid;
-
-	if (!uid_eq(current_uid(), GLOBAL_ROOT_UID))
-		return -EPERM;
-
-	pid = task_tgid_vnr(current);
-	spin_lock(&hymo_daemon_lock);
-	hymo_daemon_pid = pid;
-	spin_unlock(&hymo_daemon_lock);
-	hymo_log("daemon registered: pid=%d\n", pid);
-	return 0;
-}
-
-static const struct file_operations hymofs_dev_fops = {
+static const struct file_operations hymo_anon_fops = {
 	.owner          = THIS_MODULE,
-	.open           = hymofs_dev_open,
 	.unlocked_ioctl = hymofs_dev_ioctl,
 	.compat_ioctl   = hymofs_dev_ioctl,
 	.llseek         = noop_llseek,
 };
 
-static struct miscdevice hymofs_miscdev = {
-	.minor = MISC_DYNAMIC_MINOR,
-	.name  = "hymofs",
-	.fops  = &hymofs_dev_fops,
-	.mode  = 0600,
-};
+/**
+ * hymofs_get_anon_fd - Create and return anonymous fd for HymoFS.
+ * Called by the syscall handler (e.g. KP) when userspace invokes the syscall
+ * with HYMO_CMD_GET_FD. No device node; this is the only way to get an fd.
+ * Returns fd on success, negative errno on failure.
+ */
+int hymofs_get_anon_fd(void)
+{
+	int fd;
+	pid_t pid;
+
+	if (!uid_eq(current_uid(), GLOBAL_ROOT_UID))
+		return -EPERM;
+	fd = anon_inode_getfd("hymo", &hymo_anon_fops, NULL, O_RDWR | O_CLOEXEC);
+	if (fd < 0)
+		return fd;
+	pid = task_tgid_vnr(current);
+	spin_lock(&hymo_daemon_lock);
+	hymo_daemon_pid = pid;
+	spin_unlock(&hymo_daemon_lock);
+	return fd;
+}
+EXPORT_SYMBOL_GPL(hymofs_get_anon_fd);
 
 /* ======================================================================
  * Part 18: Hook Wrappers - Original Function Pointers
@@ -1927,20 +1931,13 @@ static int __init hymofs_lkm_init(void)
 	hash_init(hymo_xattr_sbs);
 	hash_init(hymo_merge_dirs);
 
-	/* Register miscdevice */
-	ret = misc_register(&hymofs_miscdev);
-	if (ret) {
-		pr_err("hymofs: misc_register failed: %d\n", ret);
-		return ret;
-	}
-	pr_info("hymofs: /dev/hymofs registered\n");
+	/* No device node: anon fd via syscall -> hymofs_get_anon_fd() */
 
 	/* Install ftrace hooks */
 #ifdef CONFIG_FUNCTION_TRACER
 	ret = hymofs_install_hooks(hymofs_hooks, HYMOFS_HOOK_COUNT);
 	if (ret) {
 		pr_err("hymofs: hook installation failed: %d\n", ret);
-		misc_deregister(&hymofs_miscdev);
 		return ret;
 	}
 	pr_info("hymofs: initialized (%zu hooks active)\n", HYMOFS_HOOK_COUNT);
@@ -1958,9 +1955,6 @@ static void __exit hymofs_lkm_exit(void)
 #ifdef CONFIG_FUNCTION_TRACER
 	hymofs_remove_hooks(hymofs_hooks, HYMOFS_HOOK_COUNT);
 #endif
-
-	/* Deregister miscdevice */
-	misc_deregister(&hymofs_miscdev);
 
 	/* Clean up all rules and wait for RCU grace period */
 	spin_lock(&hymo_cfg_lock);
