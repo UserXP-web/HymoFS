@@ -49,10 +49,24 @@ MODULE_VERSION("0.1.0");
  * Part 1: Ftrace Hook Infrastructure
  * ====================================================================== */
 
+/* Global state needed early for ftrace thunk fast-path.
+ * Moved above ftrace code so the thunk can access them. */
+static bool hymofs_enabled;  /* false by default; daemon enables via ioctl */
+static atomic_t hymo_rule_count = ATOMIC_INIT(0);
+static atomic_t hymo_hide_count = ATOMIC_INIT(0);
+
 #ifdef CONFIG_FUNCTION_TRACER
 static int hymofs_resolve_hook_addr(struct hymofs_ftrace_hook *hook);
 
-/* Ftrace callback: redirect function entry to our wrapper */
+/* Ftrace callback: redirect function entry to our wrapper.
+ *
+ * CRITICAL OPTIMIZATION: Check global state BEFORE redirecting.
+ * When hymofs is disabled or no rules exist, we return immediately
+ * without modifying the instruction pointer. This means the original
+ * kernel function runs with only ONE ftrace trampoline entry instead
+ * of TWO (our hook calling orig_* would trigger ftrace again).
+ * This eliminates ~50% of ftrace overhead for the no-rules case.
+ */
 static void notrace hymofs_ftrace_thunk(unsigned long ip, unsigned long parent_ip,
 					struct ftrace_ops *ops,
 					struct ftrace_regs *fregs)
@@ -64,8 +78,16 @@ static void notrace hymofs_ftrace_thunk(unsigned long ip, unsigned long parent_i
 	if (!regs)
 		return;
 
-	/* Skip hooks from within this module (anti-recursion) */
+	/* Anti-recursion: skip hooks from within this module */
 	if (within_module(parent_ip, THIS_MODULE))
+		return;
+
+	/* Global fast path: skip redirect entirely when nothing to do.
+	 * The original function runs unmodified - no double ftrace entry. */
+	if (likely(!READ_ONCE(hymofs_enabled)))
+		return;
+	if (likely(atomic_read(&hymo_rule_count) == 0 &&
+		   atomic_read(&hymo_hide_count) == 0))
 		return;
 
 	/* Redirect execution to our hook function */
@@ -209,7 +231,7 @@ static DEFINE_SPINLOCK(hymo_inject_lock);
 static bool hymo_allowlist_loaded;
 static DEFINE_MUTEX(hymo_allowlist_lock);
 
-static bool hymofs_enabled = true;
+/* hymofs_enabled declared above ftrace thunk */
 bool hymo_debug_enabled;
 static bool hymo_stealth_enabled = true;
 
@@ -223,8 +245,7 @@ static DEFINE_SPINLOCK(hymo_daemon_lock);
 
 static DECLARE_BITMAP(hymo_path_bloom, HYMO_BLOOM_SIZE);
 static DECLARE_BITMAP(hymo_hide_bloom, HYMO_BLOOM_SIZE);
-static atomic_t hymo_rule_count = ATOMIC_INIT(0);
-static atomic_t hymo_hide_count = ATOMIC_INIT(0);
+/* hymo_rule_count and hymo_hide_count declared above ftrace thunk */
 
 /* hymo_log macro is in hymofs_lkm.h */
 
@@ -1541,42 +1562,38 @@ static struct filename *hook_getname_flags(const char __user *filename,
 {
 	struct filename *result;
 	char *target;
+	bool is_absolute;
 
 	result = orig_getname_flags(filename, flags, empty);
 
-	/* Ultra-fast bailout: no rules at all */
-	if (likely(!hymofs_enabled))
-		return result;
-	if (likely(atomic_read(&hymo_rule_count) == 0 &&
-		   atomic_read(&hymo_hide_count) == 0))
-		return result;
+	/* The thunk already checked hymofs_enabled and rule counts,
+	 * but keep a safety check for IS_ERR and early exits. */
 	if (IS_ERR(result))
 		return result;
 
-	/* Daemon never gets intercepted */
-	if (hymo_daemon_pid > 0 &&
-	    task_tgid_vnr(current) == hymo_daemon_pid)
+	/* Aligned with original hymofs.c hymofs_handle_getname:
+	 * bail out when all hash tables are empty. */
+	if (likely(hash_empty(hymo_paths) &&
+		   hash_empty(hymo_hide_paths) &&
+		   hash_empty(hymo_merge_dirs)))
 		return result;
 
-	/* Only process absolute paths - relative path resolution is too
-	 * expensive for the hot path (2x PAGE_SIZE alloc + d_path).
-	 * Userspace daemon should always pass absolute paths. */
-	if (result->name[0] != '/')
-		return result;
+	is_absolute = (result->name[0] == '/');
 
 	/* Check hide rules (bloom filter fast-path inside) */
-	if (unlikely(atomic_read(&hymo_hide_count) > 0) &&
-	    hymofs_should_hide(result->name)) {
+	if (unlikely(hymofs_should_hide(result->name))) {
 		putname(result);
 		return ERR_PTR(-ENOENT);
 	}
 
-	/* Try forward redirect */
-	target = hymofs_resolve_target(result->name);
-	if (target) {
-		putname(result);
-		result = getname_kernel(target);
-		kfree(target);
+	/* Try forward redirect (only absolute paths) */
+	if (likely(is_absolute)) {
+		target = hymofs_resolve_target(result->name);
+		if (unlikely(target)) {
+			putname(result);
+			result = getname_kernel(target);
+			kfree(target);
+		}
 	}
 	return result;
 }
@@ -1613,13 +1630,12 @@ static int hook_vfs_getattr(const struct path *path, struct kstat *stat,
 			    u32 request_mask, unsigned int query_flags)
 {
 	int ret;
+	struct inode *inode;
 
 	ret = orig_vfs_getattr(path, stat, request_mask, query_flags);
 
-	/* Ultra-fast bailout chain */
-	if (likely(ret != 0 || !hymofs_enabled || !hymo_stealth_enabled))
-		return ret;
-	if (likely(atomic_read(&hymo_rule_count) == 0))
+	/* Fast bailout: error or stealth not needed */
+	if (likely(ret != 0 || !hymo_stealth_enabled))
 		return ret;
 	if (!hymofs_needs_stat_check(path))
 		return ret;
@@ -1631,26 +1647,20 @@ static int hook_vfs_getattr(const struct path *path, struct kstat *stat,
 	    task_tgid_vnr(current) == hymo_daemon_pid)
 		return ret;
 
-	/*
-	 * Only check inode bits - NO path allocation needed.
-	 * Inode bits are set when rules are added (ADD_RULE / HIDE_RULE).
-	 */
-	if (path->dentry && d_inode(path->dentry)) {
-		struct inode *inode = d_inode(path->dentry);
+	/* O(1) inode-bit checks. No path allocation. */
+	if (!path->dentry)
+		return ret;
+	inode = d_inode(path->dentry);
+	if (!inode || !inode->i_mapping)
+		return ret;
 
-		/* Fast inode-bit check: was this file replaced/injected? */
-		if (inode->i_mapping &&
-		    test_bit(AS_FLAGS_HYMO_HIDE, &inode->i_mapping->flags)) {
-			stat->ino ^= 0x48594D4F;
-		}
+	if (test_bit(AS_FLAGS_HYMO_HIDE, &inode->i_mapping->flags))
+		stat->ino ^= 0x48594D4F;
 
-		/* Spoof mtime only for directories with injected content */
-		if (S_ISDIR(inode->i_mode) && inode->i_mapping &&
-		    test_bit(AS_FLAGS_HYMO_DIR_HAS_HIDDEN,
-			     &inode->i_mapping->flags)) {
-			ktime_get_real_ts64(&stat->mtime);
-			stat->ctime = stat->mtime;
-		}
+	if (S_ISDIR(inode->i_mode) &&
+	    test_bit(AS_FLAGS_HYMO_DIR_HAS_HIDDEN, &inode->i_mapping->flags)) {
+		ktime_get_real_ts64(&stat->mtime);
+		stat->ctime = stat->mtime;
 	}
 
 	return ret;
@@ -1664,9 +1674,8 @@ static char *hook_d_path(const struct path *path, char *buf, int bufsize)
 {
 	char *res = orig_d_path(path, buf, bufsize);
 
-	/* Ultra-fast bailout: no rules -> no reverse mapping needed */
-	if (likely(!hymofs_enabled || atomic_read(&hymo_rule_count) == 0))
-		return res;
+	/* Thunk already checked enabled + rule counts.
+	 * Keep IS_ERR check and hash_empty as secondary fast path. */
 	if (IS_ERR(res))
 		return res;
 
@@ -1750,13 +1759,13 @@ static int hook_iterate_dir(struct file *file, struct dir_context *ctx)
 {
 	struct hymofs_filldir_wrapper wrapper;
 	struct inode *dir_inode;
+	bool need_filter = false;
+	bool is_dev_dir = false;
 	int ret;
 
-	/* Ultra-fast bailout */
-	if (likely(!hymofs_enabled))
-		return orig_iterate_dir(file, ctx);
-	if (likely(atomic_read(&hymo_rule_count) == 0 &&
-		   atomic_read(&hymo_hide_count) == 0))
+	/* These checks mirror the thunk, but are kept as safety net
+	 * in case the hook is entered through an indirect path. */
+	if (likely(!READ_ONCE(hymofs_enabled)))
 		return orig_iterate_dir(file, ctx);
 
 	/* Root/daemon: no filtering */
@@ -1766,7 +1775,7 @@ static int hook_iterate_dir(struct file *file, struct dir_context *ctx)
 	    task_tgid_vnr(current) == hymo_daemon_pid)
 		return orig_iterate_dir(file, ctx);
 
-	/* Check inode bit first */
+	/* Check inode bit: does this directory have hidden entries? */
 	wrapper.dir_has_hidden = false;
 	wrapper.parent_dentry = NULL;
 	wrapper.dir_path = NULL;
@@ -1781,22 +1790,29 @@ static int hook_iterate_dir(struct file *file, struct dir_context *ctx)
 		wrapper.parent_dentry = file->f_path.dentry;
 	}
 
-	/* If nothing to hide and stealth not relevant, skip entirely */
-	if (likely(!wrapper.dir_has_hidden && !hymo_stealth_enabled))
-		return orig_iterate_dir(file, ctx);
+	/* Determine if we actually need filtering.
+	 * Aligned with original hymofs.c __hymofs_check_filldir:
+	 *   - dir_has_hidden: need to filter hidden entries (inode bit check)
+	 *   - /dev stealth: only for /dev directory, hide mirror device
+	 * Do NOT wrap ALL directories when stealth is enabled! */
+	if (wrapper.dir_has_hidden)
+		need_filter = true;
 
-	/*
-	 * For stealth /dev check, we need dir_path_len.
-	 * Use d_path only for stealth; hide check uses dcache (no path needed).
-	 */
-	if (hymo_stealth_enabled && wrapper.parent_dentry) {
+	if (!need_filter && hymo_stealth_enabled && wrapper.parent_dentry) {
 		const char *dname = wrapper.parent_dentry->d_name.name;
-		/* Quick check: is this /dev? (top-level "dev" dentry) */
 		if (dname[0] == 'd' && dname[1] == 'e' && dname[2] == 'v' &&
 		    dname[3] == '\0') {
-			wrapper.dir_path_len = 4; /* signal "/dev" to filldir */
+			is_dev_dir = true;
+			need_filter = true;
 		}
 	}
+
+	/* Fast path: nothing to filter -> run original directly */
+	if (likely(!need_filter))
+		return orig_iterate_dir(file, ctx);
+
+	if (is_dev_dir)
+		wrapper.dir_path_len = 4;
 
 	wrapper.wrap_ctx.actor = hymofs_filldir_filter;
 	wrapper.wrap_ctx.pos = ctx->pos;
