@@ -43,7 +43,10 @@
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Anatdx");
 MODULE_DESCRIPTION("HymoFS ftrace-based LKM");
-MODULE_VERSION("0.1.0");
+#ifndef HYMOFS_VERSION
+#define HYMOFS_VERSION "0.1.0-dev"
+#endif
+MODULE_VERSION(HYMOFS_VERSION);
 
 /* ======================================================================
  * Part 1: Ftrace Hook Infrastructure
@@ -1686,19 +1689,22 @@ static char *hook_d_path(const struct path *path, char *buf, int bufsize)
 	    task_tgid_vnr(current) == hymo_daemon_pid)
 		return res;
 
-	/* Only allocate if we actually have targets/merge rules */
+	/* Only process if we actually have targets/merge rules */
 	if (likely(hash_empty(hymo_targets) && hash_empty(hymo_merge_dirs)))
 		return res;
 
+	/*
+	 * Use stack buffer to avoid kmalloc on every d_path call.
+	 * Android paths are typically < 256 bytes; if the reverse-mapped
+	 * path is longer, we simply skip it (rare, acceptable).
+	 * Original hymofs.c doesn't need this because the hook is inline.
+	 */
 	{
-		char *temp = kmalloc(bufsize, GFP_KERNEL);
-		if (temp) {
-			int len = hymofs_reverse_lookup(res, temp, bufsize);
-			if (len > 0 && len < bufsize) {
-				memcpy(buf, temp, len + 1);
-				res = buf;
-			}
-			kfree(temp);
+		char temp[256];
+		int len = hymofs_reverse_lookup(res, temp, sizeof(temp));
+		if (len > 0 && len < bufsize) {
+			memcpy(buf, temp, len + 1);
+			res = buf;
 		}
 	}
 	return res;
@@ -1733,8 +1739,13 @@ hymofs_filldir_filter(struct dir_context *ctx, const char *name,
 	 * Hide check using dcache lookup (from original hymofs.c):
 	 * O(1) d_hash_and_lookup on parent dentry -> check inode bit.
 	 * NO string allocation, NO path building, NO hash table walk.
+	 *
+	 * CRITICAL: check allowlist BEFORE d_hash_and_lookup (aligned with
+	 * original __hymofs_check_filldir line 2276). Without this, system
+	 * processes like system_server hit d_hash_and_lookup on every entry.
 	 */
-	if (w->dir_has_hidden && w->parent_dentry) {
+	if (w->dir_has_hidden && w->parent_dentry &&
+	    !hymo_is_privileged_process() && hymo_should_apply_hide_rules()) {
 		struct dentry *child;
 
 		child = d_hash_and_lookup(w->parent_dentry,
@@ -1845,7 +1856,7 @@ static int __init hymofs_lkm_init(void)
 {
 	int ret;
 
-	pr_info("hymofs: initializing LKM v%s\n", "0.1.0");
+	pr_info("hymofs: initializing LKM v%s\n", HYMOFS_VERSION);
 
 	/* Initialize hash tables */
 	hash_init(hymo_paths);

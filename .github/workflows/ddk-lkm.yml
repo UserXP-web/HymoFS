@@ -91,8 +91,10 @@ jobs:
             make -C "$KERNEL_SRC" ARCH=arm64 LLVM=1 defconfig
           make -C "$KERNEL_SRC" ARCH=arm64 LLVM=1 modules_prepare
 
-          echo "Building hymofs_lkm.ko..."
-          make -C "$KERNEL_SRC" ARCH=arm64 LLVM=1 M="$SRC" KBUILD_MODPOST_WARN=1 modules
+          VERSION="${{ steps.parse_version.outputs.VERSION }}"
+          echo "Building hymofs_lkm.ko (v0.1.${VERSION})..."
+          make -C "$KERNEL_SRC" ARCH=arm64 LLVM=1 M="$SRC" KBUILD_MODPOST_WARN=1 \
+            CFLAGS_MODULE="-DHYMOFS_VERSION=\\\"0.1.${VERSION}\\\"" modules
           ls -la "$SRC"/hymofs_lkm.ko
           llvm-strip -d "$SRC"/hymofs_lkm.ko
 
@@ -100,6 +102,7 @@ jobs:
         run: |
           set -euo pipefail
           KMI="${{ inputs.kmi }}"
+          VERSION="${{ steps.parse_version.outputs.VERSION }}"
           SRC="$GITHUB_WORKSPACE/src"
           OUT="$GITHUB_WORKSPACE/out"
           MODDIR="$OUT/hymofs_lkm_magisk"
@@ -113,12 +116,19 @@ jobs:
           mkdir -p "$OUT"
           rm -rf "$MODDIR"
           cp -a "$TEMPLATE_DIR" "$MODDIR"
+
+          # Stamp version from git commit count
+          sed -i "s/^version=.*/version=0.1.${VERSION}/" "$MODDIR/module.prop"
+          sed -i "s/^versionCode=.*/versionCode=${VERSION}/" "$MODDIR/module.prop"
+
           cp "$SRC/hymofs_lkm.ko" "$OUT/${KMI}_hymofs_lkm.ko"
           cp "$SRC/hymofs_lkm.ko" "$MODDIR/hymofs_lkm.ko"
           chmod 0755 "$MODDIR/post-fs-data.sh"
 
           (cd "$MODDIR" && zip -r "$OUT/${KMI}_hymofs_lkm_magisk.zip" .)
 
+          echo "module.prop:"
+          cat "$MODDIR/module.prop"
           ls -la "$OUT"
 
       - name: Upload raw .ko
