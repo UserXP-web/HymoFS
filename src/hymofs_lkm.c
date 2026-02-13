@@ -48,9 +48,12 @@ MODULE_DESCRIPTION("HymoFS ftrace-based LKM");
 #endif
 MODULE_VERSION(HYMOFS_VERSION);
 
-/* GKI 6.1+ puts VFS symbols in a protected namespace.
- * We must declare the import or the module loader rejects us. */
-MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);
+/*
+ * NOTE: We do NOT use MODULE_IMPORT_NS() for VFS symbols.
+ * Instead, ALL VFS symbols (kern_path, kernel_read, filp_open, ihold,
+ * strndup_user, getname_kernel) are resolved dynamically via kprobe
+ * in hymofs_lkm_init(). This avoids GKI namespace protection entirely.
+ */
 
 /* ======================================================================
  * Part 1: Ftrace Hook Infrastructure
@@ -181,23 +184,20 @@ static void hymofs_remove_hooks(struct hymofs_ftrace_hook *hooks, size_t count)
  *          also needed for filp_open/filp_close kallsyms lookup)
  * ====================================================================== */
 
-/* Try kallsyms first, fall back to kprobe trick */
+/*
+ * Resolve kernel symbol by name using kprobe trick.
+ * kallsyms_lookup_name is NOT exported on GKI 5.7+, so we use
+ * register_kprobe() which internally resolves the symbol for us.
+ */
 static unsigned long hymofs_lookup_name(const char *name)
 {
+	struct kprobe kp = { .symbol_name = name };
 	unsigned long addr;
 
-#ifdef CONFIG_KALLSYMS
-	addr = kallsyms_lookup_name(name);
-	if (addr)
-		return addr;
-#endif
-	{
-		struct kprobe kp = { .symbol_name = name };
-		if (register_kprobe(&kp) < 0)
-			return 0;
-		addr = (unsigned long)kp.addr;
-		unregister_kprobe(&kp);
-	}
+	if (register_kprobe(&kp) < 0)
+		return 0;
+	addr = (unsigned long)kp.addr;
+	unregister_kprobe(&kp);
 	return addr;
 }
 
@@ -596,11 +596,17 @@ static void hymo_add_allow_uid(uid_t uid)
 }
 
 /*
- * filp_open is not exported on some GKI kernels (err -2 ENOENT).
- * Resolve via kallsyms at runtime so the module can still load.
+ * GKI kernels protect many VFS symbols behind namespaces or don't export
+ * them at all. We resolve ALL problematic VFS symbols via kprobe at init
+ * time, so the module has zero direct VFS symbol dependencies.
  */
 static struct file *(*hymo_filp_open)(const char *, int, umode_t);
 static int (*hymo_filp_close)(struct file *, fl_owner_t);
+static ssize_t (*hymo_kernel_read)(struct file *, void *, size_t, loff_t *);
+static int (*hymo_kern_path)(const char *, unsigned int, struct path *);
+static char *(*hymo_strndup_user)(const char __user *, long);
+static struct filename *(*hymo_getname_kernel)(const char *);
+static void (*hymo_ihold)(struct inode *);
 
 static bool hymo_reload_ksu_allowlist(void)
 {
@@ -611,8 +617,8 @@ static bool hymo_reload_ksu_allowlist(void)
 	struct hymo_app_profile profile;
 	int count = 0;
 
-	/* filp_open not available on this kernel - skip allowlist */
-	if (!hymo_filp_open)
+	/* VFS symbols not available on this kernel - skip allowlist */
+	if (!hymo_filp_open || !hymo_kernel_read)
 		return false;
 
 	if (!mutex_trylock(&hymo_allowlist_lock))
@@ -628,10 +634,10 @@ static bool hymo_reload_ksu_allowlist(void)
 		return false;
 	}
 
-	ret = kernel_read(fp, &magic, sizeof(magic), &off);
+	ret = hymo_kernel_read(fp, &magic, sizeof(magic), &off);
 	if (ret != sizeof(magic) || magic != HYMO_KSU_ALLOWLIST_MAGIC)
 		goto bad;
-	ret = kernel_read(fp, &version, sizeof(version), &off);
+	ret = hymo_kernel_read(fp, &version, sizeof(version), &off);
 	if (ret != sizeof(version))
 		goto bad;
 
@@ -640,7 +646,7 @@ static bool hymo_reload_ksu_allowlist(void)
 	hymo_allowlist_loaded = true;
 	spin_unlock(&hymo_allow_uids_lock);
 
-	while (kernel_read(fp, &profile, sizeof(profile), &off) == sizeof(profile)) {
+	while (hymo_kernel_read(fp, &profile, sizeof(profile), &off) == sizeof(profile)) {
 		if (!hymo_should_umount_profile(&profile) && profile.current_uid > 0) {
 			hymo_add_allow_uid((uid_t)profile.current_uid);
 			if (++count >= HYMO_ALLOWLIST_UID_MAX)
@@ -737,7 +743,7 @@ static char * __maybe_unused hymofs_resolve_target(const char *pathname)
 	/* Validate merge target exists */
 	if (target) {
 		struct path p;
-		if (kern_path(target, LOOKUP_FOLLOW, &p) == 0) {
+		if (hymo_kern_path(target, LOOKUP_FOLLOW, &p) == 0) {
 			path_put(&p);
 		} else {
 			kfree(target);
@@ -1074,7 +1080,7 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 			return -EFAULT;
 		if (!req.src)
 			return -EINVAL;
-		new_path = strndup_user(req.src, PATH_MAX);
+		new_path = hymo_strndup_user(req.src, PATH_MAX);
 		if (IS_ERR(new_path))
 			return PTR_ERR(new_path);
 
@@ -1109,12 +1115,12 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 		return -EFAULT;
 
 	if (req.src) {
-		src = strndup_user(req.src, PAGE_SIZE);
+		src = hymo_strndup_user(req.src, PAGE_SIZE);
 		if (IS_ERR(src))
 			return PTR_ERR(src);
 	}
 	if (req.target) {
-		target = strndup_user(req.target, PAGE_SIZE);
+		target = hymo_strndup_user(req.target, PAGE_SIZE);
 		if (IS_ERR(target)) {
 			kfree(src);
 			return PTR_ERR(target);
@@ -1179,7 +1185,7 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 		if (!tmp_buf) { ret = -ENOMEM; break; }
 
 		/* Try to resolve full path */
-		if (kern_path(src, LOOKUP_FOLLOW, &path) == 0) {
+		if (hymo_kern_path(src, LOOKUP_FOLLOW, &path) == 0) {
 			char *res = d_path(&path, tmp_buf, PATH_MAX);
 			if (!IS_ERR(res)) {
 				resolved_src = kstrdup(res, GFP_KERNEL);
@@ -1201,11 +1207,11 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 			}
 			if (d_inode(path.dentry)) {
 				src_inode = d_inode(path.dentry);
-				ihold(src_inode);
+				hymo_ihold(src_inode);
 			}
 			if (path.dentry->d_parent && d_inode(path.dentry->d_parent)) {
 				parent_inode = d_inode(path.dentry->d_parent);
-				ihold(parent_inode);
+				hymo_ihold(parent_inode);
 			}
 			path_put(&path);
 		} else {
@@ -1216,7 +1222,7 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 				if (p_str) {
 					memcpy(p_str, src, l);
 					p_str[l] = '\0';
-					if (kern_path(p_str, LOOKUP_FOLLOW, &path) == 0) {
+					if (hymo_kern_path(p_str, LOOKUP_FOLLOW, &path) == 0) {
 						char *res = d_path(&path, tmp_buf, PATH_MAX);
 						if (!IS_ERR(res)) {
 							size_t rl = strlen(res);
@@ -1324,17 +1330,17 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 		tmp_buf = kmalloc(PATH_MAX, GFP_KERNEL);
 		if (!tmp_buf) { ret = -ENOMEM; break; }
 
-		if (kern_path(src, LOOKUP_FOLLOW, &path) == 0) {
+		if (hymo_kern_path(src, LOOKUP_FOLLOW, &path) == 0) {
 			char *res = d_path(&path, tmp_buf, PATH_MAX);
 			if (!IS_ERR(res))
 				resolved_src = kstrdup(res, GFP_KERNEL);
 			if (d_inode(path.dentry)) {
 				target_inode = d_inode(path.dentry);
-				ihold(target_inode);
+				hymo_ihold(target_inode);
 			}
 			if (path.dentry->d_parent && d_inode(path.dentry->d_parent)) {
 				parent_inode = d_inode(path.dentry->d_parent);
-				ihold(parent_inode);
+				hymo_ihold(parent_inode);
 			}
 			path_put(&path);
 		}
@@ -1399,7 +1405,7 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 
 		if (!src) { ret = -EINVAL; break; }
 
-		if (kern_path(src, LOOKUP_FOLLOW, &path) == 0) {
+		if (hymo_kern_path(src, LOOKUP_FOLLOW, &path) == 0) {
 			struct super_block *sb = path.dentry->d_sb;
 
 			spin_lock(&hymo_xattr_sbs_lock);
@@ -1614,11 +1620,11 @@ static struct filename *hook_getname_flags(const char __user *filename,
 	}
 
 	/* Try forward redirect (only absolute paths) */
-	if (likely(is_absolute)) {
+	if (likely(is_absolute) && hymo_getname_kernel) {
 		target = hymofs_resolve_target(result->name);
 		if (unlikely(target)) {
 			putname(result);
-			result = getname_kernel(target);
+			result = hymo_getname_kernel(target);
 			kfree(target);
 		}
 	}
@@ -1882,11 +1888,36 @@ static int __init hymofs_lkm_init(void)
 
 	pr_info("hymofs: initializing LKM v%s\n", HYMOFS_VERSION);
 
-	/* Resolve symbols not exported on some GKI kernels */
+	/*
+	 * Resolve ALL VFS symbols via kprobe - GKI kernels protect these
+	 * behind namespaces or don't export them at all.
+	 * Critical symbols fail the module load; optional ones just warn.
+	 */
+	hymo_kern_path = (void *)hymofs_lookup_name("kern_path");
+	if (!hymo_kern_path) {
+		pr_err("hymofs: FATAL - kern_path not found\n");
+		return -ENOENT;
+	}
+	hymo_strndup_user = (void *)hymofs_lookup_name("strndup_user");
+	if (!hymo_strndup_user) {
+		pr_err("hymofs: FATAL - strndup_user not found\n");
+		return -ENOENT;
+	}
+	hymo_ihold = (void *)hymofs_lookup_name("ihold");
+	if (!hymo_ihold) {
+		pr_err("hymofs: FATAL - ihold not found\n");
+		return -ENOENT;
+	}
+	hymo_getname_kernel = (void *)hymofs_lookup_name("getname_kernel");
+	if (!hymo_getname_kernel)
+		pr_warn("hymofs: getname_kernel not found, path redirect may fail\n");
+
+	/* Optional: allowlist support */
 	hymo_filp_open = (void *)hymofs_lookup_name("filp_open");
 	hymo_filp_close = (void *)hymofs_lookup_name("filp_close");
-	if (!hymo_filp_open)
-		pr_warn("hymofs: filp_open not found, allowlist disabled\n");
+	hymo_kernel_read = (void *)hymofs_lookup_name("kernel_read");
+	if (!hymo_filp_open || !hymo_kernel_read)
+		pr_warn("hymofs: filp_open/kernel_read not found, allowlist disabled\n");
 
 	/* Initialize hash tables */
 	hash_init(hymo_paths);
