@@ -11,32 +11,26 @@ jobs:
   build-lkm:
     name: Build hymofs_lkm.ko
     runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/ylarod/ddk:android15-6.6-20251104
+      options: --privileged
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install build deps
+      - name: Build hymofs_lkm.ko
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential flex bison libelf-dev libssl-dev
-
-      - name: Prepare kernel (modules_prepare)
-        run: |
-          KERNEL_SRC="$GITHUB_WORKSPACE/patch_workspace/lkm/common"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          KERNEL_SRC="/kernel"
+          SRC="$GITHUB_WORKSPACE/src"
+          if [ ! -f "$KERNEL_SRC/Makefile" ]; then
+            KERNEL_SRC="$GITHUB_WORKSPACE/kernel"
+          fi
           if [ ! -f "$KERNEL_SRC/Makefile" ]; then
             echo "Kernel tree not found at $KERNEL_SRC"
             exit 1
           fi
-          cd "$KERNEL_SRC"
-          make ARCH=arm64 defconfig
-          make ARCH=arm64 modules_prepare
-
-      - name: Build hymofs_lkm.ko
-        run: |
-          KERNEL_SRC="$GITHUB_WORKSPACE/patch_workspace/lkm/common"
-          SRC="$GITHUB_WORKSPACE/src"
-          cd "$KERNEL_SRC"
-          make ARCH=arm64 M="$SRC" modules
+          make -C "$KERNEL_SRC" ARCH=arm64 M="$SRC" CC=clang LLVM=1 modules
           ls -la "$SRC"/hymofs_lkm.ko
 
       - name: Upload hymofs_lkm.ko
