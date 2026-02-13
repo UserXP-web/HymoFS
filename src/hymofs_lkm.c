@@ -1730,7 +1730,7 @@ passthrough:
 	return w->orig_ctx->actor(w->orig_ctx, name, namlen, offset, ino, d_type);
 }
 
-static int hook_iterate_dir(struct file *file, struct dir_context *ctx)
+static __maybe_unused int hook_iterate_dir(struct file *file, struct dir_context *ctx)
 {
 	struct hymofs_filldir_wrapper wrapper;
 	struct inode *dir_inode;
