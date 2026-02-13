@@ -8,12 +8,17 @@ on:
         required: true
         type: string
       ddk_release:
-        description: "DDK release version"
+        description: "Legacy input (kept for compatibility)"
         required: false
         default: "20251104"
         type: string
-      kernel_src:
-        description: "Optional kernel tree path override"
+      kernel_repo_url:
+        description: "Kernel repository URL"
+        required: false
+        default: "https://android.googlesource.com/kernel/common"
+        type: string
+      kernel_ref:
+        description: "Kernel ref/branch (empty: use kmi, e.g. android15-6.6)"
         required: false
         default: ""
         type: string
@@ -22,47 +27,61 @@ jobs:
   build-hymofs-ko:
     name: Build hymofs_lkm.ko for ${{ inputs.kmi }}
     runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/ylarod/ddk:${{ inputs.kmi }}-${{ inputs.ddk_release }}
-      options: --privileged
 
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
 
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            git make clang lld llvm \
+            flex bison bc rsync cpio \
+            libelf-dev libssl-dev pahole
+
+      - name: Fetch kernel tree
+        run: |
+          set -euo pipefail
+          KMI="${{ inputs.kmi }}"
+          KERNEL_REPO_URL="${{ inputs.kernel_repo_url }}"
+          KERNEL_REF="${{ inputs.kernel_ref }}"
+          if [ -z "$KERNEL_REF" ]; then
+            KERNEL_REF="$KMI"
+          fi
+
+          KERNEL_SRC="$GITHUB_WORKSPACE/kernel"
+          rm -rf "$KERNEL_SRC"
+          echo "Cloning kernel tree: $KERNEL_REPO_URL @$KERNEL_REF"
+          git clone --depth=1 --branch "$KERNEL_REF" "$KERNEL_REPO_URL" "$KERNEL_SRC"
+          test -f "$KERNEL_SRC/Makefile"
+          echo "Kernel tree ready at: $KERNEL_SRC"
+
       - name: Build hymofs_lkm.ko
         run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          KERNEL_SRC="${{ inputs.kernel_src }}"
-          if [ -z "$KERNEL_SRC" ]; then
-            for cand in \
-              "$GITHUB_WORKSPACE/kernel" \
-              "/kernel" \
-              "/workspace/kernel" \
-              "/__w/kernel" \
-              "/src/kernel"
-            do
-              if [ -f "$cand/Makefile" ]; then
-                KERNEL_SRC="$cand"
-                break
-              fi
-            done
+          set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE" || true
+          KMI="${{ inputs.kmi }}"
+          KERNEL_REPO_URL="${{ inputs.kernel_repo_url }}"
+          KERNEL_REF="${{ inputs.kernel_ref }}"
+          if [ -z "$KERNEL_REF" ]; then
+            KERNEL_REF="$KMI"
           fi
+          KERNEL_SRC="$GITHUB_WORKSPACE/kernel"
           SRC="$GITHUB_WORKSPACE/src"
+
           if [ ! -f "$KERNEL_SRC/Makefile" ]; then
             echo "Kernel tree not found at $KERNEL_SRC"
-            echo "Checked candidates:"
-            echo "  - $GITHUB_WORKSPACE/kernel"
-            echo "  - /kernel"
-            echo "  - /workspace/kernel"
-            echo "  - /__w/kernel"
-            echo "  - /src/kernel"
-            echo "PWD: $(pwd)"
-            echo "GITHUB_WORKSPACE: $GITHUB_WORKSPACE"
-            ls -la /
+            echo "Kernel source expected from: $KERNEL_REPO_URL@$KERNEL_REF"
             exit 1
           fi
-          echo "Using kernel tree: $KERNEL_SRC"
+
+          echo "Preparing kernel tree..."
+          make -C "$KERNEL_SRC" ARCH=arm64 LLVM=1 gki_defconfig || \
+            make -C "$KERNEL_SRC" ARCH=arm64 LLVM=1 defconfig
+          make -C "$KERNEL_SRC" ARCH=arm64 LLVM=1 modules_prepare
+
+          echo "Building hymofs_lkm.ko..."
           make -C "$KERNEL_SRC" ARCH=arm64 LLVM=1 M="$SRC" modules
           ls -la "$SRC"/hymofs_lkm.ko
           llvm-strip -d "$SRC"/hymofs_lkm.ko
