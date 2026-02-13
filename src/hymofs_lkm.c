@@ -933,7 +933,8 @@ static bool __maybe_unused hymofs_should_replace(const char *pathname)
 }
 
 /* ======================================================================
- * Part 15: Dispatch Handler (all HYMO_CMD_* commands)
+ * Part 15: Dispatch Handler (ioctl only; all commands use HYMO_IOC_* from hymo_magic.h)
+ * GET_FD is syscall-only -> hymofs_get_anon_fd()
  * ====================================================================== */
 
 static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
@@ -947,9 +948,7 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 	bool found = false;
 	int ret = 0;
 
-	/* GET_FD is not handled here: anon fd is obtained via syscall -> hymofs_get_anon_fd() */
-
-	if (cmd == HYMO_CMD_CLEAR_ALL) {
+	if (cmd == HYMO_IOC_CLEAR_ALL) {
 		spin_lock(&hymo_cfg_lock);
 		spin_lock(&hymo_rules_lock);
 		spin_lock(&hymo_hide_lock);
@@ -973,10 +972,14 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 		return 0;
 	}
 
-	if (cmd == HYMO_CMD_GET_VERSION)
-		return HYMO_PROTOCOL_VERSION;
+	if (cmd == HYMO_IOC_GET_VERSION) {
+		int ver = HYMO_PROTOCOL_VERSION;
+		if (copy_to_user(arg, &ver, sizeof(ver)))
+			return -EFAULT;
+		return 0;
+	}
 
-	if (cmd == HYMO_CMD_SET_DEBUG) {
+	if (cmd == HYMO_IOC_SET_DEBUG) {
 		int val;
 		if (copy_from_user(&val, arg, sizeof(val)))
 			return -EFAULT;
@@ -984,7 +987,7 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 		return 0;
 	}
 
-	if (cmd == HYMO_CMD_SET_STEALTH) {
+	if (cmd == HYMO_IOC_SET_STEALTH) {
 		int val;
 		if (copy_from_user(&val, arg, sizeof(val)))
 			return -EFAULT;
@@ -992,7 +995,7 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 		return 0;
 	}
 
-	if (cmd == HYMO_CMD_SET_ENABLED) {
+	if (cmd == HYMO_IOC_SET_ENABLED) {
 		int val;
 		if (copy_from_user(&val, arg, sizeof(val)))
 			return -EFAULT;
@@ -1004,12 +1007,12 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 		return 0;
 	}
 
-	if (cmd == HYMO_CMD_REORDER_MNT_ID) {
+	if (cmd == HYMO_IOC_REORDER_MNT_ID) {
 		/* Mount operations not supported in LKM (needs internal mount.h) */
 		return -EOPNOTSUPP;
 	}
 
-	if (cmd == HYMO_CMD_LIST_RULES) {
+	if (cmd == HYMO_IOC_LIST_RULES) {
 		struct hymo_syscall_list_arg list_arg;
 		struct hymo_xattr_sb_entry *sb_entry;
 		struct hymo_merge_entry *merge_entry;
@@ -1075,7 +1078,7 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 		return 0;
 	}
 
-	if (cmd == HYMO_CMD_SET_MIRROR_PATH) {
+	if (cmd == HYMO_IOC_SET_MIRROR_PATH) {
 		char *new_path, *new_name, *slash;
 		size_t len;
 
@@ -1110,7 +1113,7 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 		return 0;
 	}
 
-	if (cmd == HYMO_CMD_SET_UNAME)
+	if (cmd == HYMO_IOC_SET_UNAME)
 		return -EOPNOTSUPP; /* TODO: uname spoofing */
 
 	/* Commands that use hymo_syscall_arg */
@@ -1131,7 +1134,7 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 	}
 
 	switch (cmd) {
-	case HYMO_CMD_ADD_MERGE_RULE: {
+	case HYMO_IOC_ADD_MERGE_RULE: {
 		struct hymo_merge_entry *me;
 
 		if (!src || !target) { ret = -EINVAL; break; }
@@ -1174,7 +1177,7 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 		break;
 	}
 
-	case HYMO_CMD_ADD_RULE: {
+	case HYMO_IOC_ADD_RULE: {
 		char *parent_dir = NULL;
 		char *resolved_src = NULL;
 		struct path path;
@@ -1321,7 +1324,7 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 		break;
 	}
 
-	case HYMO_CMD_HIDE_RULE: {
+	case HYMO_IOC_HIDE_RULE: {
 		char *resolved_src = NULL;
 		struct path path;
 		struct inode *target_inode = NULL;
@@ -1401,7 +1404,7 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 		break;
 	}
 
-	case HYMO_CMD_HIDE_OVERLAY_XATTRS: {
+	case HYMO_IOC_HIDE_OVERLAY_XATTRS: {
 		struct path path;
 		struct hymo_xattr_sb_entry *sb_entry;
 		bool xfound = false;
@@ -1439,7 +1442,7 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 		break;
 	}
 
-	case HYMO_CMD_DEL_RULE:
+	case HYMO_IOC_DEL_RULE:
 		if (!src) { ret = -EINVAL; break; }
 		hash = full_name_hash(NULL, src, strlen(src));
 		spin_lock(&hymo_rules_lock);
@@ -1498,48 +1501,22 @@ del_done:
 static long hymofs_dev_ioctl(struct file *file, unsigned int cmd,
 			     unsigned long arg)
 {
-	if (cmd == HYMO_IOC_GET_VERSION) {
-		int ver = HYMO_PROTOCOL_VERSION;
-		if (copy_to_user((void __user *)arg, &ver, sizeof(ver)))
-			return -EFAULT;
-		return 0;
-	}
-
-	if (cmd == HYMO_IOC_SET_ENABLED) {
-		int enabled;
-		if (copy_from_user(&enabled, (void __user *)arg, sizeof(enabled)))
-			return -EFAULT;
-		spin_lock(&hymo_cfg_lock);
-		hymofs_enabled = !!enabled;
-		spin_unlock(&hymo_cfg_lock);
-		if (hymofs_enabled)
-			hymo_reload_ksu_allowlist();
-		return 0;
-	}
-
 	switch (cmd) {
+	case HYMO_IOC_GET_VERSION:
+	case HYMO_IOC_SET_ENABLED:
 	case HYMO_IOC_ADD_RULE:
-		return hymo_dispatch_cmd(HYMO_CMD_ADD_RULE, (void __user *)arg);
 	case HYMO_IOC_DEL_RULE:
-		return hymo_dispatch_cmd(HYMO_CMD_DEL_RULE, (void __user *)arg);
 	case HYMO_IOC_HIDE_RULE:
-		return hymo_dispatch_cmd(HYMO_CMD_HIDE_RULE, (void __user *)arg);
 	case HYMO_IOC_CLEAR_ALL:
-		return hymo_dispatch_cmd(HYMO_CMD_CLEAR_ALL, (void __user *)arg);
 	case HYMO_IOC_LIST_RULES:
-		return hymo_dispatch_cmd(HYMO_CMD_LIST_RULES, (void __user *)arg);
 	case HYMO_IOC_SET_DEBUG:
-		return hymo_dispatch_cmd(HYMO_CMD_SET_DEBUG, (void __user *)arg);
 	case HYMO_IOC_REORDER_MNT_ID:
-		return hymo_dispatch_cmd(HYMO_CMD_REORDER_MNT_ID, (void __user *)arg);
 	case HYMO_IOC_SET_STEALTH:
-		return hymo_dispatch_cmd(HYMO_CMD_SET_STEALTH, (void __user *)arg);
 	case HYMO_IOC_HIDE_OVERLAY_XATTRS:
-		return hymo_dispatch_cmd(HYMO_CMD_HIDE_OVERLAY_XATTRS, (void __user *)arg);
 	case HYMO_IOC_ADD_MERGE_RULE:
-		return hymo_dispatch_cmd(HYMO_CMD_ADD_MERGE_RULE, (void __user *)arg);
 	case HYMO_IOC_SET_MIRROR_PATH:
-		return hymo_dispatch_cmd(HYMO_CMD_SET_MIRROR_PATH, (void __user *)arg);
+	case HYMO_IOC_SET_UNAME:
+		return hymo_dispatch_cmd(cmd, (void __user *)arg);
 	default:
 		return -EINVAL;
 	}
