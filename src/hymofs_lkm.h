@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
  * HymoFS LKM - internal header.
- * Shared constants, data structures, and ftrace hook infrastructure.
+ * Shared constants and data structures (hooks use kprobes in .c).
  *
  * Author: Anatdx
  */
@@ -17,33 +17,10 @@
 #include <linux/rcupdate.h>
 #include <linux/dcache.h>
 #include <linux/fs.h>
-#include <linux/ftrace.h>
 #include <linux/version.h>
 #include <linux/atomic.h>
 
 #include "hymo_magic.h"
-
-/* ======================================================================
- * Ftrace Hook Infrastructure
- * ====================================================================== */
-
-#ifdef CONFIG_FUNCTION_TRACER
-
-struct hymofs_ftrace_hook {
-	const char *name;
-	void *function;     /* our replacement */
-	void *original;     /* pointer to saved original func ptr */
-	unsigned long address;
-	struct ftrace_ops ops;
-};
-
-#define HYMOFS_HOOK(_name, _hook, _orig) {     \
-	.name     = (_name),                   \
-	.function = (_hook),                   \
-	.original = &(_orig),                  \
-}
-
-#endif /* CONFIG_FUNCTION_TRACER */
 
 /* ======================================================================
  * Configuration & Constants

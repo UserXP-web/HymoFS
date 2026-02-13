@@ -2,18 +2,10 @@
 /*
  * HymoFS LKM - Loadable Kernel Module for filesystem path manipulation.
  *
- * Uses ftrace hooks on key VFS functions to intercept path resolution,
- * stat, directory listing, and d_path. No device node: anon fd is obtained
- * via syscall (HYMO_CMD_GET_FD). For clean kernel only: no HymoFS patch; we find
- * sys_call_table and set_memory_* via kallsyms/kprobe and hook sys_call_table[nr]
- * Magic in hymo_magic.h. Syscall nr: passed at insmod (hymo_syscall_nr=), no default in LKM.
- * when insmod at post-fs-data so kernel and userspace stay in sync.
- *
- * Hooks:
- *   getname_flags  - forward path redirection (open/stat/access/...)
- *   vfs_getattr    - stat result spoofing (mtime, inode, dev)
- *   d_path         - reverse lookup (physical -> virtual path)
- *   iterate_dir    - directory entry hiding (filldir filter)
+ * All hooks use kprobes (no ftrace, no sys_call_table patch).
+ * GET_FD: kprobe+kretprobe on ni_syscall. VFS: kprobe pre_handlers on
+ *   getname_flags, vfs_getattr, d_path, iterate_dir.
+ * Works on CONFIG_STRICT_KERNEL_RWX kernels. Syscall nr passed at insmod (hymo_syscall_nr=).
  *
  * Author: Anatdx
  */
@@ -41,16 +33,13 @@
 #include <linux/time.h>
 #include <linux/anon_inodes.h>
 #include <linux/fcntl.h>
+#include <linux/percpu.h>
 
 #include "hymofs_lkm.h"
 
-/* set_memory_* often not exported on GKI; we resolve via kallsyms when needed */
-typedef int (*set_memory_rw_fn)(unsigned long addr, int numpages);
-typedef int (*set_memory_ro_fn)(unsigned long addr, int numpages);
-
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Anatdx");
-MODULE_DESCRIPTION("HymoFS ftrace-based LKM");
+MODULE_DESCRIPTION("HymoFS kprobes-based LKM");
 #ifndef HYMOFS_VERSION
 #define HYMOFS_VERSION "0.1.0-dev"
 #endif
@@ -67,125 +56,12 @@ MODULE_VERSION(HYMOFS_VERSION);
  * Part 1: Ftrace Hook Infrastructure
  * ====================================================================== */
 
-/* Global state needed early for ftrace thunk fast-path.
- * Moved above ftrace code so the thunk can access them. */
-static bool hymofs_enabled;  /* false by default; daemon enables via ioctl */
+static bool hymofs_enabled;
 static atomic_t hymo_rule_count = ATOMIC_INIT(0);
 static atomic_t hymo_hide_count = ATOMIC_INIT(0);
 
-#ifdef CONFIG_FUNCTION_TRACER
-static int hymofs_resolve_hook_addr(struct hymofs_ftrace_hook *hook);
-
-/* Ftrace callback: redirect function entry to our wrapper.
- *
- * CRITICAL OPTIMIZATION: Check global state BEFORE redirecting.
- * When hymofs is disabled or no rules exist, we return immediately
- * without modifying the instruction pointer. This means the original
- * kernel function runs with only ONE ftrace trampoline entry instead
- * of TWO (our hook calling orig_* would trigger ftrace again).
- * This eliminates ~50% of ftrace overhead for the no-rules case.
- */
-static void notrace hymofs_ftrace_thunk(unsigned long ip, unsigned long parent_ip,
-					struct ftrace_ops *ops,
-					struct ftrace_regs *fregs)
-{
-	struct hymofs_ftrace_hook *hook =
-		container_of(ops, struct hymofs_ftrace_hook, ops);
-	struct pt_regs *regs = ftrace_get_regs(fregs);
-
-	if (!regs)
-		return;
-
-	/* Anti-recursion: skip hooks from within this module */
-	if (within_module(parent_ip, THIS_MODULE))
-		return;
-
-	/* Global fast path: skip redirect entirely when nothing to do.
-	 * The original function runs unmodified - no double ftrace entry. */
-	if (likely(!READ_ONCE(hymofs_enabled)))
-		return;
-	if (likely(atomic_read(&hymo_rule_count) == 0 &&
-		   atomic_read(&hymo_hide_count) == 0))
-		return;
-
-	/* Redirect execution to our hook function */
-	instruction_pointer_set(regs, (unsigned long)hook->function);
-}
-
-static int hymofs_install_hook(struct hymofs_ftrace_hook *hook)
-{
-	int ret;
-
-	ret = hymofs_resolve_hook_addr(hook);
-	if (ret)
-		return ret;
-
-	*((unsigned long *)hook->original) = hook->address;
-
-	hook->ops.func = hymofs_ftrace_thunk;
-	hook->ops.flags = FTRACE_OPS_FL_SAVE_REGS | FTRACE_OPS_FL_RECURSION
-			| FTRACE_OPS_FL_IPMODIFY;
-
-	ret = ftrace_set_filter_ip(&hook->ops, hook->address, 0, 0);
-	if (ret) {
-		pr_err("hymofs: ftrace_set_filter_ip(%s) failed: %d\n",
-		       hook->name, ret);
-		return ret;
-	}
-
-	ret = register_ftrace_function(&hook->ops);
-	if (ret) {
-		pr_err("hymofs: register_ftrace_function(%s) failed: %d\n",
-		       hook->name, ret);
-		ftrace_set_filter_ip(&hook->ops, hook->address, 1, 0);
-		return ret;
-	}
-
-	return 0;
-}
-
-static void hymofs_remove_hook(struct hymofs_ftrace_hook *hook)
-{
-	int ret;
-
-	ret = unregister_ftrace_function(&hook->ops);
-	if (ret)
-		pr_warn("hymofs: unregister(%s) failed: %d\n", hook->name, ret);
-
-	ret = ftrace_set_filter_ip(&hook->ops, hook->address, 1, 0);
-	if (ret)
-		pr_warn("hymofs: filter_ip remove(%s) failed: %d\n",
-			hook->name, ret);
-}
-
-static int hymofs_install_hooks(struct hymofs_ftrace_hook *hooks, size_t count)
-{
-	size_t i;
-	int ret;
-
-	for (i = 0; i < count; i++) {
-		ret = hymofs_install_hook(&hooks[i]);
-		if (ret)
-			goto rollback;
-		pr_info("hymofs: hooked %s @0x%lx\n",
-			hooks[i].name, hooks[i].address);
-	}
-	return 0;
-
-rollback:
-	while (i--)
-		hymofs_remove_hook(&hooks[i]);
-	return ret;
-}
-
-static void hymofs_remove_hooks(struct hymofs_ftrace_hook *hooks, size_t count)
-{
-	size_t i;
-
-	for (i = 0; i < count; i++)
-		hymofs_remove_hook(&hooks[i]);
-}
-#endif /* CONFIG_FUNCTION_TRACER - hook infrastructure */
+/* Per-CPU reentry guard for VFS kprobes (hook calls orig -> would re-enter kprobe). */
+static DEFINE_PER_CPU(unsigned int, hymo_kprobe_reent);
 
 /* ======================================================================
  * Part 2: Symbol Resolution via kallsyms + kprobes (no kernel export needed)
@@ -231,18 +107,6 @@ static void hymofs_resolve_kallsyms_lookup(void)
 	pr_info("hymofs: using kallsyms_lookup_name for symbol resolution\n");
 }
 
-#ifdef CONFIG_FUNCTION_TRACER
-static int hymofs_resolve_hook_addr(struct hymofs_ftrace_hook *hook)
-{
-	hook->address = hymofs_lookup_name(hook->name);
-	if (!hook->address) {
-		pr_err("hymofs: symbol not found: %s\n", hook->name);
-		return -ENOENT;
-	}
-	return 0;
-}
-#endif /* CONFIG_FUNCTION_TRACER */
-
 /* Constants & data structures are in hymofs_lkm.h */
 
 /* ======================================================================
@@ -271,7 +135,7 @@ static DEFINE_SPINLOCK(hymo_inject_lock);
 static bool hymo_allowlist_loaded;
 static DEFINE_MUTEX(hymo_allowlist_lock);
 
-/* hymofs_enabled declared above ftrace thunk */
+/* hymofs_enabled declared above (used by hooks) */
 bool hymo_debug_enabled;
 static bool hymo_stealth_enabled = true;
 
@@ -285,7 +149,7 @@ static DEFINE_SPINLOCK(hymo_daemon_lock);
 
 static DECLARE_BITMAP(hymo_path_bloom, HYMO_BLOOM_SIZE);
 static DECLARE_BITMAP(hymo_hide_bloom, HYMO_BLOOM_SIZE);
-/* hymo_rule_count and hymo_hide_count declared above ftrace thunk */
+/* hymo_rule_count and hymo_hide_count declared above */
 
 /* hymo_log macro is in hymofs_lkm.h */
 
@@ -1584,42 +1448,70 @@ int hymofs_get_anon_fd(void)
 }
 EXPORT_SYMBOL_GPL(hymofs_get_anon_fd);
 
-/* Clean kernel: hook sys_call_table[nr]. nr = hymo_syscall_nr param; must be passed at insmod (no default). */
-static unsigned long *hymo_sys_call_table;
-static long (*hymo_orig_syscall_fn)(const struct pt_regs *);
+/* GET_FD via kprobe/kretprobe on ni_syscall: no sys_call_table patch, works on CONFIG_STRICT_KERNEL_RWX kernels. */
 static int hymo_syscall_nr_param = 0;
 module_param_named(hymo_syscall_nr, hymo_syscall_nr_param, int, 0600);
-MODULE_PARM_DESC(hymo_syscall_nr, "Syscall number to hook. Must be passed at insmod (e.g. by metahymo post-fs-data) to match userspace; no default.");
+MODULE_PARM_DESC(hymo_syscall_nr, "Syscall number to intercept (e.g. 448). Must be passed at insmod; we kprobe ni_syscall and match this nr.");
 
-/* Our replacement syscall handler when using sys_call_table hook. ABI: regs hold (magic1, magic2, cmd, arg). */
-static long hymo_syscall_handler(const struct pt_regs *regs)
+/* Per-CPU: when set, kretprobe will replace return value with this fd. */
+static DEFINE_PER_CPU(int, hymo_override_fd);
+static DEFINE_PER_CPU(int, hymo_override_active);
+
+static int hymo_ni_syscall_pre(struct kprobe *p, struct pt_regs *regs)
 {
 #if defined(__aarch64__)
+	unsigned long nr = regs->regs[8];
 	unsigned long a0 = regs->regs[0];
 	unsigned long a1 = regs->regs[1];
 	unsigned long a2 = regs->regs[2];
 #elif defined(__x86_64__)
+	unsigned long nr = regs->orig_ax;
 	unsigned long a0 = regs->di;
 	unsigned long a1 = regs->si;
 	unsigned long a2 = regs->dx;
 #else
-	unsigned long a0 = 0, a1 = 0, a2 = 0;
+	unsigned long nr = 0, a0 = 0, a1 = 0, a2 = 0;
 #endif
-	if (a0 == HYMO_MAGIC1 && a1 == HYMO_MAGIC2 && a2 == (unsigned long)HYMO_CMD_GET_FD) {
-		if (!uid_eq(current_uid(), GLOBAL_ROOT_UID))
-			return -EPERM;
-		return hymofs_get_anon_fd();
+	if (nr != (unsigned long)hymo_syscall_nr_param)
+		return 0;
+	if (a0 != HYMO_MAGIC1 || a1 != HYMO_MAGIC2 || a2 != (unsigned long)HYMO_CMD_GET_FD)
+		return 0;
+	if (!uid_eq(current_uid(), GLOBAL_ROOT_UID))
+		return 0;
+	{
+		int fd = hymofs_get_anon_fd();
+		if (fd < 0)
+			return 0;
+		this_cpu_write(hymo_override_fd, fd);
+		this_cpu_write(hymo_override_active, 1);
 	}
-	if (hymo_orig_syscall_fn)
-		return hymo_orig_syscall_fn(regs);
-	return -ENOSYS;
+	return 0;
 }
 
+static int hymo_ni_syscall_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
+{
+	if (!this_cpu_read(hymo_override_active))
+		return 0;
+#if defined(__aarch64__)
+	regs->regs[0] = this_cpu_read(hymo_override_fd);
+#elif defined(__x86_64__)
+	regs->ax = this_cpu_read(hymo_override_fd);
+#endif
+	this_cpu_write(hymo_override_active, 0);
+	return 0;
+}
+
+static struct kprobe hymo_kp_ni = {
+	.pre_handler = hymo_ni_syscall_pre,
+};
+static struct kretprobe hymo_krp_ni = {
+	.handler = hymo_ni_syscall_ret,
+};
+
 /* ======================================================================
- * Part 18: Hook Wrappers - Original Function Pointers
+ * Part 18: Original function pointers (resolved at init for kprobe hooks)
  * ====================================================================== */
 
-#ifdef CONFIG_FUNCTION_TRACER
 static struct filename *(*orig_getname_flags)(const char __user *, int, int *);
 static int (*orig_vfs_getattr)(const struct path *, struct kstat *, u32, unsigned int);
 static char *(*orig_d_path)(const struct path *, char *, int);
@@ -1638,8 +1530,7 @@ static struct filename *hook_getname_flags(const char __user *filename,
 
 	result = orig_getname_flags(filename, flags, empty);
 
-	/* The thunk already checked hymofs_enabled and rule counts,
-	 * but keep a safety check for IS_ERR and early exits. */
+	/* Keep safety check for IS_ERR and early exits. */
 	if (IS_ERR(result))
 		return result;
 
@@ -1746,8 +1637,7 @@ static char *hook_d_path(const struct path *path, char *buf, int bufsize)
 {
 	char *res = orig_d_path(path, buf, bufsize);
 
-	/* Thunk already checked enabled + rule counts.
-	 * Keep IS_ERR check and hash_empty as secondary fast path. */
+	/* Keep IS_ERR check and hash_empty as secondary fast path. */
 	if (IS_ERR(res))
 		return res;
 
@@ -1843,8 +1733,7 @@ static int hook_iterate_dir(struct file *file, struct dir_context *ctx)
 	bool is_dev_dir = false;
 	int ret;
 
-	/* These checks mirror the thunk, but are kept as safety net
-	 * in case the hook is entered through an indirect path. */
+	/* Safety checks in case the hook is entered through an indirect path. */
 	if (likely(!READ_ONCE(hymofs_enabled)))
 		return orig_iterate_dir(file, ctx);
 
@@ -1905,17 +1794,123 @@ static int hook_iterate_dir(struct file *file, struct dir_context *ctx)
 }
 
 /* ======================================================================
- * Part 23: Hook Table
+ * Part 23: Kprobe pre_handlers (call hook, set return regs, skip original)
  * ====================================================================== */
 
-static struct hymofs_ftrace_hook hymofs_hooks[] = {
-	HYMOFS_HOOK("getname_flags", hook_getname_flags, orig_getname_flags),
-	HYMOFS_HOOK("vfs_getattr",   hook_vfs_getattr,   orig_vfs_getattr),
-	HYMOFS_HOOK("d_path",        hook_d_path,        orig_d_path),
-	HYMOFS_HOOK("iterate_dir",   hook_iterate_dir,   orig_iterate_dir),
+#if defined(__aarch64__)
+#define HYMO_REG0(regs)		((regs)->regs[0])
+#define HYMO_REG1(regs)		((regs)->regs[1])
+#define HYMO_REG2(regs)		((regs)->regs[2])
+#define HYMO_REG3(regs)		((regs)->regs[3])
+#define HYMO_LR(regs)		((regs)->regs[30])
+#define HYMO_POP_STACK(regs)	do { } while (0)
+#elif defined(__x86_64__)
+#define HYMO_REG0(regs)		((regs)->di)
+#define HYMO_REG1(regs)		((regs)->si)
+#define HYMO_REG2(regs)		((regs)->dx)
+#define HYMO_REG3(regs)		((regs)->cx)
+#define HYMO_LR(regs)		(*(unsigned long *)(regs)->sp)
+#define HYMO_POP_STACK(regs)	do { (regs)->sp += 8; } while (0)
+#else
+#define HYMO_REG0(regs)		(0)
+#define HYMO_REG1(regs)		(0)
+#define HYMO_REG2(regs)		(0)
+#define HYMO_REG3(regs)		(0)
+#define HYMO_LR(regs)		(0)
+#define HYMO_POP_STACK(regs)	do { } while (0)
+#endif
+
+static int hymo_kp_getname_flags_pre(struct kprobe *p, struct pt_regs *regs)
+{
+	if (this_cpu_read(hymo_kprobe_reent))
+		return 0;
+	this_cpu_write(hymo_kprobe_reent, 1);
+	{
+		struct filename *r = hook_getname_flags((const char __user *)HYMO_REG0(regs),
+							(int)HYMO_REG1(regs),
+							(int *)HYMO_REG2(regs));
+		HYMO_REG0(regs) = (unsigned long)r;
+		instruction_pointer_set(regs, HYMO_LR(regs));
+		HYMO_POP_STACK(regs);
+#if defined(__x86_64__)
+		regs->ax = (unsigned long)r;
+#endif
+	}
+	this_cpu_write(hymo_kprobe_reent, 0);
+	return 1;
+}
+
+static int hymo_kp_vfs_getattr_pre(struct kprobe *p, struct pt_regs *regs)
+{
+	if (this_cpu_read(hymo_kprobe_reent))
+		return 0;
+	this_cpu_write(hymo_kprobe_reent, 1);
+	{
+		int r = hook_vfs_getattr((const struct path *)HYMO_REG0(regs),
+					(struct kstat *)HYMO_REG1(regs),
+					(u32)HYMO_REG2(regs),
+					(unsigned int)HYMO_REG3(regs));
+		HYMO_REG0(regs) = (unsigned long)r;
+		instruction_pointer_set(regs, HYMO_LR(regs));
+		HYMO_POP_STACK(regs);
+#if defined(__x86_64__)
+		regs->ax = (unsigned long)r;
+#endif
+	}
+	this_cpu_write(hymo_kprobe_reent, 0);
+	return 1;
+}
+
+static int hymo_kp_d_path_pre(struct kprobe *p, struct pt_regs *regs)
+{
+	if (this_cpu_read(hymo_kprobe_reent))
+		return 0;
+	this_cpu_write(hymo_kprobe_reent, 1);
+	{
+		char *r = hook_d_path((const struct path *)HYMO_REG0(regs),
+				      (char *)HYMO_REG1(regs),
+				      (int)HYMO_REG2(regs));
+		HYMO_REG0(regs) = (unsigned long)r;
+		instruction_pointer_set(regs, HYMO_LR(regs));
+		HYMO_POP_STACK(regs);
+#if defined(__x86_64__)
+		regs->ax = (unsigned long)r;
+#endif
+	}
+	this_cpu_write(hymo_kprobe_reent, 0);
+	return 1;
+}
+
+static int hymo_kp_iterate_dir_pre(struct kprobe *p, struct pt_regs *regs)
+{
+	if (this_cpu_read(hymo_kprobe_reent))
+		return 0;
+	this_cpu_write(hymo_kprobe_reent, 1);
+	{
+		int r = hook_iterate_dir((struct file *)HYMO_REG0(regs),
+					 (struct dir_context *)HYMO_REG1(regs));
+		HYMO_REG0(regs) = (unsigned long)r;
+		instruction_pointer_set(regs, HYMO_LR(regs));
+		HYMO_POP_STACK(regs);
+#if defined(__x86_64__)
+		regs->ax = (unsigned long)r;
+#endif
+	}
+	this_cpu_write(hymo_kprobe_reent, 0);
+	return 1;
+}
+
+#define HYMOFS_VFS_HOOK_COUNT 4
+static const struct {
+	const char *name;
+	int (*pre)(struct kprobe *, struct pt_regs *);
+} hymofs_vfs_hooks[] = {
+	{ "getname_flags", hymo_kp_getname_flags_pre },
+	{ "vfs_getattr",   hymo_kp_vfs_getattr_pre },
+	{ "d_path",        hymo_kp_d_path_pre },
+	{ "iterate_dir",   hymo_kp_iterate_dir_pre },
 };
-#define HYMOFS_HOOK_COUNT ARRAY_SIZE(hymofs_hooks)
-#endif /* CONFIG_FUNCTION_TRACER */
+static struct kprobe hymofs_kprobes[HYMOFS_VFS_HOOK_COUNT];
 
 /* ======================================================================
  * Part 24: Module Init / Exit
@@ -1967,61 +1962,74 @@ static int __init hymofs_lkm_init(void)
 	/* Resolve kallsyms first so all lookups can use it (no kernel exports needed). */
 	hymofs_resolve_kallsyms_lookup();
 
-	/* Clean kernel: hook sys_call_table[nr]. nr must be passed at insmod. */
+	/* GET_FD: kprobe+kretprobe on ni_syscall; no sys_call_table patch. */
 	if (hymo_syscall_nr_param <= 0) {
 		pr_err("hymofs: hymo_syscall_nr must be positive and passed at insmod (e.g. hymo_syscall_nr=448)\n");
 		return -EINVAL;
 	}
 	{
-		const char *table_names[] = { "sys_call_table", "__arm64_sys_call_table", NULL };
-		set_memory_rw_fn fn_rw = (set_memory_rw_fn)hymofs_lookup_name("set_memory_rw");
-		set_memory_ro_fn fn_ro = (set_memory_ro_fn)hymofs_lookup_name("set_memory_ro");
-		unsigned long table_addr = 0;
-		int i;
+		const char *ni_names[] = { "__arm64_sys_ni_syscall", "sys_ni_syscall", "__x64_sys_ni_syscall", NULL };
+		unsigned long ni_addr = 0;
+		int i, ret;
 
-		for (i = 0; table_names[i]; i++) {
-			table_addr = hymofs_lookup_name(table_names[i]);
-			if (table_addr)
+		for (i = 0; ni_names[i]; i++) {
+			ni_addr = hymofs_lookup_name(ni_names[i]);
+			if (ni_addr)
 				break;
 		}
-		if (!table_addr) {
-			pr_err("hymofs: sys_call_table not found\n");
+		if (!ni_addr) {
+			pr_err("hymofs: ni_syscall symbol not found (tried __arm64_sys_ni_syscall, sys_ni_syscall, __x64_sys_ni_syscall)\n");
 			return -ENOENT;
 		}
-		if (!fn_rw || !fn_ro) {
-			pr_err("hymofs: set_memory_rw/set_memory_ro not found\n");
-			return -ENOENT;
-		}
-		{
-			unsigned long *table = (unsigned long *)table_addr;
-			unsigned long entry_addr = (unsigned long)&table[hymo_syscall_nr_param];
-			unsigned long page = entry_addr & PAGE_MASK;
-
-			hymo_orig_syscall_fn = (long (*)(const struct pt_regs *))table[hymo_syscall_nr_param];
-			if (fn_rw(page, 1)) {
-				pr_err("hymofs: set_memory_rw(sys_call_table page) failed\n");
-				return -EPERM;
-			}
-			table[hymo_syscall_nr_param] = (unsigned long)hymo_syscall_handler;
-			fn_ro(page, 1);
-			hymo_sys_call_table = table;
-			pr_info("hymofs: sys_call_table[%d] hooked (GET_FD, clean kernel)\n", hymo_syscall_nr_param);
-		}
-	}
-
-	/* Install ftrace hooks */
-#ifdef CONFIG_FUNCTION_TRACER
-	{
-		int ret = hymofs_install_hooks(hymofs_hooks, HYMOFS_HOOK_COUNT);
+		hymo_kp_ni.addr = (kprobe_opcode_t *)ni_addr;
+		hymo_krp_ni.kp.addr = (kprobe_opcode_t *)ni_addr;
+		ret = register_kprobe(&hymo_kp_ni);
 		if (ret) {
-			pr_err("hymofs: hook installation failed: %d\n", ret);
+			pr_err("hymofs: register_kprobe(ni_syscall) failed: %d\n", ret);
 			return ret;
 		}
+		ret = register_kretprobe(&hymo_krp_ni);
+		if (ret) {
+			unregister_kprobe(&hymo_kp_ni);
+			pr_err("hymofs: register_kretprobe(ni_syscall) failed: %d\n", ret);
+			return ret;
+		}
+		pr_info("hymofs: GET_FD via kprobe on ni_syscall (syscall nr=%d)\n", hymo_syscall_nr_param);
 	}
-	pr_info("hymofs: initialized (%zu hooks active)\n", HYMOFS_HOOK_COUNT);
-#else
-	pr_warn("hymofs: CONFIG_FUNCTION_TRACER not set, hooks disabled\n");
-#endif
+
+	/* Install VFS kprobes */
+	{
+		size_t i;
+		int ret;
+
+		for (i = 0; i < HYMOFS_VFS_HOOK_COUNT; i++) {
+			unsigned long addr = hymofs_lookup_name(hymofs_vfs_hooks[i].name);
+			if (!addr) {
+				pr_err("hymofs: symbol not found: %s\n", hymofs_vfs_hooks[i].name);
+				while (i--)
+					unregister_kprobe(&hymofs_kprobes[i]);
+				return -ENOENT;
+			}
+			switch (i) {
+			case 0: orig_getname_flags = (void *)addr; break;
+			case 1: orig_vfs_getattr = (void *)addr; break;
+			case 2: orig_d_path = (void *)addr; break;
+			case 3: orig_iterate_dir = (void *)addr; break;
+			}
+			hymofs_kprobes[i].addr = (kprobe_opcode_t *)addr;
+			hymofs_kprobes[i].pre_handler = hymofs_vfs_hooks[i].pre;
+			ret = register_kprobe(&hymofs_kprobes[i]);
+			if (ret) {
+				pr_err("hymofs: register_kprobe(%s) failed: %d\n",
+				       hymofs_vfs_hooks[i].name, ret);
+				while (i--)
+					unregister_kprobe(&hymofs_kprobes[i]);
+				return ret;
+			}
+			pr_info("hymofs: kprobe %s @0x%lx\n", hymofs_vfs_hooks[i].name, addr);
+		}
+	}
+	pr_info("hymofs: initialized (%d VFS kprobes + GET_FD)\n", HYMOFS_VFS_HOOK_COUNT);
 	return 0;
 }
 
@@ -2029,25 +2037,14 @@ static void __exit hymofs_lkm_exit(void)
 {
 	pr_info("hymofs: shutting down\n");
 
-	/* Restore sys_call_table entry */
-	if (hymo_sys_call_table && hymo_orig_syscall_fn) {
-		set_memory_rw_fn fn_rw = (set_memory_rw_fn)hymofs_lookup_name("set_memory_rw");
-		set_memory_ro_fn fn_ro = (set_memory_ro_fn)hymofs_lookup_name("set_memory_ro");
-		unsigned long entry_addr = (unsigned long)&hymo_sys_call_table[hymo_syscall_nr_param];
-		unsigned long page = entry_addr & PAGE_MASK;
+	unregister_kretprobe(&hymo_krp_ni);
+	unregister_kprobe(&hymo_kp_ni);
 
-		if (fn_rw && fn_ro && fn_rw(page, 1) == 0) {
-			hymo_sys_call_table[hymo_syscall_nr_param] = (unsigned long)hymo_orig_syscall_fn;
-			fn_ro(page, 1);
-		}
-		hymo_sys_call_table = NULL;
-		hymo_orig_syscall_fn = NULL;
+	{
+		size_t i;
+		for (i = 0; i < HYMOFS_VFS_HOOK_COUNT; i++)
+			unregister_kprobe(&hymofs_kprobes[i]);
 	}
-
-	/* Remove hooks first to stop interception */
-#ifdef CONFIG_FUNCTION_TRACER
-	hymofs_remove_hooks(hymofs_hooks, HYMOFS_HOOK_COUNT);
-#endif
 
 	/* Clean up all rules and wait for RCU grace period */
 	spin_lock(&hymo_cfg_lock);
