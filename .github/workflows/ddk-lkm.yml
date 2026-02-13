@@ -12,6 +12,11 @@ on:
         required: false
         default: "20251104"
         type: string
+      kernel_src:
+        description: "Optional kernel tree path override"
+        required: false
+        default: ""
+        type: string
 
 jobs:
   build-hymofs-ko:
@@ -28,12 +33,36 @@ jobs:
       - name: Build hymofs_lkm.ko
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          KERNEL_SRC="$GITHUB_WORKSPACE/kernel"
+          KERNEL_SRC="${{ inputs.kernel_src }}"
+          if [ -z "$KERNEL_SRC" ]; then
+            for cand in \
+              "$GITHUB_WORKSPACE/kernel" \
+              "/kernel" \
+              "/workspace/kernel" \
+              "/__w/kernel" \
+              "/src/kernel"
+            do
+              if [ -f "$cand/Makefile" ]; then
+                KERNEL_SRC="$cand"
+                break
+              fi
+            done
+          fi
           SRC="$GITHUB_WORKSPACE/src"
           if [ ! -f "$KERNEL_SRC/Makefile" ]; then
             echo "Kernel tree not found at $KERNEL_SRC"
+            echo "Checked candidates:"
+            echo "  - $GITHUB_WORKSPACE/kernel"
+            echo "  - /kernel"
+            echo "  - /workspace/kernel"
+            echo "  - /__w/kernel"
+            echo "  - /src/kernel"
+            echo "PWD: $(pwd)"
+            echo "GITHUB_WORKSPACE: $GITHUB_WORKSPACE"
+            ls -la /
             exit 1
           fi
+          echo "Using kernel tree: $KERNEL_SRC"
           make -C "$KERNEL_SRC" ARCH=arm64 LLVM=1 M="$SRC" modules
           ls -la "$SRC"/hymofs_lkm.ko
           llvm-strip -d "$SRC"/hymofs_lkm.ko
