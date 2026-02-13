@@ -1886,23 +1886,19 @@ static int hymo_kp_d_path_pre(struct kprobe *p, struct pt_regs *regs)
 	return 1;
 }
 
+/*
+ * iterate_dir pre-handler: do NOT call orig_iterate_dir from here.
+ * The call chain (VFS -> f2fs -> fscrypt -> crypto -> kernel_neon_begin)
+ * uses NEON; on ARM64, NEON in kprobe/brk context triggers a BUG and
+ * causes bootloop. So we always pass through (return 0) and let the
+ * kernel run the original. Directory hiding / dev stealth is disabled
+ * for the kprobe LKM build.
+ */
 static int hymo_kp_iterate_dir_pre(struct kprobe *p, struct pt_regs *regs)
 {
-	if (this_cpu_read(hymo_kprobe_reent))
-		return 0;
-	this_cpu_write(hymo_kprobe_reent, 1);
-	{
-		int r = hook_iterate_dir((struct file *)HYMO_REG0(regs),
-					 (struct dir_context *)HYMO_REG1(regs));
-		HYMO_REG0(regs) = (unsigned long)r;
-		instruction_pointer_set(regs, HYMO_LR(regs));
-		HYMO_POP_STACK(regs);
-#if defined(__x86_64__)
-		regs->ax = (unsigned long)r;
-#endif
-	}
-	this_cpu_write(hymo_kprobe_reent, 0);
-	return 1;
+	(void)p;
+	(void)regs;
+	return 0;
 }
 
 #define HYMOFS_VFS_HOOK_COUNT 4
