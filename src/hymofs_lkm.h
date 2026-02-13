@@ -1,0 +1,203 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/*
+ * HymoFS LKM - internal header.
+ * Shared constants, data structures, and ftrace hook infrastructure.
+ *
+ * Author: Anatdx
+ */
+#ifndef _HYMOFS_LKM_H
+#define _HYMOFS_LKM_H
+
+#include <linux/types.h>
+#include <linux/list.h>
+#include <linux/hashtable.h>
+#include <linux/xarray.h>
+#include <linux/spinlock.h>
+#include <linux/mutex.h>
+#include <linux/rcupdate.h>
+#include <linux/dcache.h>
+#include <linux/fs.h>
+#include <linux/ftrace.h>
+#include <linux/version.h>
+#include <linux/atomic.h>
+
+#include "hymo_magic.h"
+
+/* ======================================================================
+ * Ftrace Hook Infrastructure
+ * ====================================================================== */
+
+#ifdef CONFIG_FUNCTION_TRACER
+
+struct hymofs_ftrace_hook {
+	const char *name;
+	void *function;     /* our replacement */
+	void *original;     /* pointer to saved original func ptr */
+	unsigned long address;
+	struct ftrace_ops ops;
+};
+
+#define HYMOFS_HOOK(_name, _hook, _orig) {     \
+	.name     = (_name),                   \
+	.function = (_hook),                   \
+	.original = &(_orig),                  \
+}
+
+#endif /* CONFIG_FUNCTION_TRACER */
+
+/* ======================================================================
+ * Configuration & Constants
+ * ====================================================================== */
+
+#define HYMO_HASH_BITS              12
+#define HYMO_BLOOM_BITS             10
+#define HYMO_BLOOM_SIZE             (1 << HYMO_BLOOM_BITS)
+#define HYMO_BLOOM_MASK             (HYMO_BLOOM_SIZE - 1)
+#define HYMO_MERGE_HASH_BITS        6
+#define HYMO_MERGE_HASH_SIZE        (1 << HYMO_MERGE_HASH_BITS)
+
+#define HYMO_ALLOWLIST_UID_MAX      1024
+#define HYMO_KSU_ALLOWLIST_PATH     "/data/adb/ksu/.allowlist"
+#define HYMO_KSU_ALLOWLIST_MAGIC    0x7f4b5355
+#define HYMO_KSU_ALLOWLIST_VERSION  3
+#define HYMO_KSU_MAX_PACKAGE_NAME   256
+#define HYMO_KSU_MAX_GROUPS         32
+#define HYMO_KSU_SELINUX_DOMAIN     64
+
+#define HYMO_DEFAULT_MIRROR_NAME    "hymo_mirror"
+#define HYMO_DEFAULT_MIRROR_PATH    "/dev/" HYMO_DEFAULT_MIRROR_NAME
+
+/* dir_context.actor return type: 6.1+ uses bool */
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0))
+#define HYMO_FILLDIR_RET_TYPE int
+#define HYMO_FILLDIR_CONTINUE 0
+#define HYMO_FILLDIR_STOP     1
+#else
+#define HYMO_FILLDIR_RET_TYPE bool
+#define HYMO_FILLDIR_CONTINUE true
+#define HYMO_FILLDIR_STOP     false
+#endif
+
+/* Allowlist UID marker */
+#define HYMO_UID_ALLOW_MARKER ((void *)1)
+
+/* ======================================================================
+ * Data Structures
+ * ====================================================================== */
+
+struct hymo_entry {
+	char *src;
+	char *target;
+	unsigned char type;
+	u32 src_hash;
+	struct hlist_node node;
+	struct hlist_node target_node;
+	struct rcu_head rcu;
+};
+
+struct hymo_hide_entry {
+	char *path;
+	u32 path_hash;
+	struct hlist_node node;
+	struct rcu_head rcu;
+};
+
+struct hymo_inject_entry {
+	char *dir;
+	struct hlist_node node;
+	struct rcu_head rcu;
+};
+
+struct hymo_xattr_sb_entry {
+	struct super_block *sb;
+	struct hlist_node node;
+	struct rcu_head rcu;
+};
+
+struct hymo_merge_entry {
+	char *src;
+	char *target;
+	struct hlist_node node;
+	struct rcu_head rcu;
+};
+
+struct hymo_merge_trie_node {
+	char *comp;
+	size_t comp_len;
+	struct hymo_merge_trie_node *first_child;
+	struct hymo_merge_trie_node *next_sibling;
+	struct hymo_merge_entry *entry;
+	struct rcu_head rcu;
+};
+
+struct hymo_merge_target_node {
+	struct list_head list;
+	char *target;
+	struct dentry *target_dentry;
+};
+
+struct hymo_name_list {
+	char *name;
+	unsigned char type;
+	struct list_head list;
+};
+
+/* KSU allowlist structures */
+struct hymo_root_profile {
+	s32 uid;
+	s32 gid;
+	s32 groups_count;
+	s32 groups[HYMO_KSU_MAX_GROUPS];
+	struct {
+		u64 effective;
+		u64 permitted;
+		u64 inheritable;
+	} capabilities;
+	char selinux_domain[HYMO_KSU_SELINUX_DOMAIN];
+	s32 namespaces;
+};
+
+struct hymo_non_root_profile {
+	bool umount_modules;
+};
+
+struct hymo_app_profile {
+	u32 version;
+	char key[HYMO_KSU_MAX_PACKAGE_NAME];
+	s32 current_uid;
+	bool allow_su;
+	union {
+		struct {
+			bool use_default;
+			char template_name[HYMO_KSU_MAX_PACKAGE_NAME];
+			struct hymo_root_profile profile;
+		} rp_config;
+		struct {
+			bool use_default;
+			struct hymo_non_root_profile profile;
+		} nrp_config;
+	};
+};
+
+/* iterate_dir hook wrapper context */
+struct hymofs_filldir_wrapper {
+	struct dir_context wrap_ctx;
+	struct dir_context *orig_ctx;
+	char *dir_path;
+	int dir_path_len;
+	bool dir_has_hidden;
+};
+
+/* ======================================================================
+ * Logging
+ * ====================================================================== */
+
+#define hymo_log(fmt, ...) do { \
+	if (hymo_debug_enabled) \
+		pr_info("hymofs: " fmt, ##__VA_ARGS__); \
+} while (0)
+
+/* debug flag - defined in hymofs_lkm.c */
+extern bool hymo_debug_enabled;
+
+#endif /* _HYMOFS_LKM_H */
