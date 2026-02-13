@@ -4,7 +4,7 @@
  *
  * Uses ftrace hooks on key VFS functions to intercept path resolution,
  * stat, directory listing, and d_path. No device node: anon fd is obtained
- * via syscall (HYMO_CMD_GET_FD). Syscall handler (e.g. KP) calls hymofs_get_anon_fd().
+ * via syscall (HYMO_CMD_GET_FD). Our own HymoFS syscall (HYMO_MAGIC1/MAGIC2) calls hymo_dispatch_cmd_hook(cmd,arg); we register our handler at init.
  *
  * Hooks:
  *   getname_flags  - forward path redirection (open/stat/access/...)
@@ -1535,8 +1535,6 @@ static const struct file_operations hymo_anon_fops = {
 
 /**
  * hymofs_get_anon_fd - Create and return anonymous fd for HymoFS.
- * Called by the syscall handler (e.g. KP) when userspace invokes the syscall
- * with HYMO_CMD_GET_FD. No device node; this is the only way to get an fd.
  * Returns fd on success, negative errno on failure.
  */
 int hymofs_get_anon_fd(void)
@@ -1556,6 +1554,21 @@ int hymofs_get_anon_fd(void)
 	return fd;
 }
 EXPORT_SYMBOL_GPL(hymofs_get_anon_fd);
+
+/*
+ * HymoFS syscall (our own, e.g. for KSU) calls hymo_dispatch_cmd_hook(cmd, arg). We register this so
+ * GET_FD returns the anon fd; other commands are -EINVAL (ioctl-only on the fd).
+ */
+static int hymo_lkm_dispatch_for_syscall(unsigned int cmd, void __user *arg)
+{
+	if (cmd == HYMO_CMD_GET_FD)
+		return hymofs_get_anon_fd();
+	return -EINVAL;
+}
+
+/* Kernel has hymo_dispatch_cmd_hook (from HymoFS syscall patch); we write our handler into it at init. */
+typedef int (*hymo_dispatch_fn)(unsigned int cmd, void __user *arg);
+static hymo_dispatch_fn *hymo_dispatch_cmd_hook_ptr;
 
 /* ======================================================================
  * Part 18: Hook Wrappers - Original Function Pointers
@@ -1906,7 +1919,13 @@ static int __init hymofs_lkm_init(void)
 	hash_init(hymo_xattr_sbs);
 	hash_init(hymo_merge_dirs);
 
-	/* No device node: anon fd via syscall -> hymofs_get_anon_fd() */
+	/* Register with HymoFS syscall: kernel will call hymo_dispatch_cmd_hook(cmd, arg) */
+	hymo_dispatch_cmd_hook_ptr = (hymo_dispatch_fn *)hymofs_lookup_name("hymo_dispatch_cmd_hook");
+	if (hymo_dispatch_cmd_hook_ptr) {
+		*hymo_dispatch_cmd_hook_ptr = hymo_lkm_dispatch_for_syscall;
+		pr_info("hymofs: hymo_dispatch_cmd_hook registered (syscall GET_FD)\n");
+	} else
+		pr_warn("hymofs: hymo_dispatch_cmd_hook not found (kernel without HymoFS syscall?); GET_FD will fail\n");
 
 	/* Install ftrace hooks */
 #ifdef CONFIG_FUNCTION_TRACER
@@ -1927,6 +1946,10 @@ static int __init hymofs_lkm_init(void)
 static void __exit hymofs_lkm_exit(void)
 {
 	pr_info("hymofs: shutting down\n");
+
+	/* Unregister from KP so syscall no longer calls us */
+	if (hymo_dispatch_cmd_hook_ptr)
+		*hymo_dispatch_cmd_hook_ptr = NULL;
 
 	/* Remove hooks first to stop interception */
 #ifdef CONFIG_FUNCTION_TRACER
