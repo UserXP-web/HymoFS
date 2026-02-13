@@ -1,0 +1,45 @@
+name: Build HymoFS Kernel Module
+
+on:
+  workflow_call:
+    inputs:
+      kmi:
+        description: "KMI version"
+        required: true
+        type: string
+      ddk_release:
+        description: "DDK release version"
+        required: false
+        default: "20251104"
+        type: string
+
+jobs:
+  build-hymofs-ko:
+    name: Build hymofs_lkm.ko for ${{ inputs.kmi }}
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/ylarod/ddk:${{ inputs.kmi }}-${{ inputs.ddk_release }}
+      options: --privileged
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Build hymofs_lkm.ko
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          KERNEL_SRC="$GITHUB_WORKSPACE/kernel"
+          SRC="$GITHUB_WORKSPACE/src"
+          if [ ! -f "$KERNEL_SRC/Makefile" ]; then
+            echo "Kernel tree not found at $KERNEL_SRC"
+            exit 1
+          fi
+          make -C "$KERNEL_SRC" ARCH=arm64 LLVM=1 M="$SRC" modules
+          ls -la "$SRC"/hymofs_lkm.ko
+          llvm-strip -d "$SRC"/hymofs_lkm.ko
+
+      - name: Upload hymofs_lkm.ko artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.kmi }}-hymofs-lkm
+          path: src/hymofs_lkm.ko

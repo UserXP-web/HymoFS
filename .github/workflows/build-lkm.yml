@@ -1,40 +1,21 @@
-name: Build LKM (HymoFS)
+name: Build LKM for HymoFS
 
 on:
+  workflow_call:
+  workflow_dispatch:
   push:
     branches:
       - lkm
-  workflow_call:
-  workflow_dispatch:
 
 jobs:
   build-lkm:
-    name: Build hymofs_lkm.ko
-    runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/ylarod/ddk:android15-6.6-20251104
-      options: --privileged
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Build hymofs_lkm.ko
-        run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          KERNEL_SRC="/kernel"
-          SRC="$GITHUB_WORKSPACE/src"
-          if [ ! -f "$KERNEL_SRC/Makefile" ]; then
-            KERNEL_SRC="$GITHUB_WORKSPACE/kernel"
-          fi
-          if [ ! -f "$KERNEL_SRC/Makefile" ]; then
-            echo "Kernel tree not found at $KERNEL_SRC"
-            exit 1
-          fi
-          make -C "$KERNEL_SRC" ARCH=arm64 M="$SRC" CC=clang LLVM=1 modules
-          ls -la "$SRC"/hymofs_lkm.ko
-
-      - name: Upload hymofs_lkm.ko
-        uses: actions/upload-artifact@v4
-        with:
-          name: hymofs-lkm
-          path: src/hymofs_lkm.ko
+    strategy:
+      fail-fast: false
+      matrix:
+        kmi:
+          - android15-6.6
+    uses: ./.github/workflows/ddk-lkm.yml
+    secrets: inherit
+    with:
+      kmi: ${{ matrix.kmi }}
+      ddk_release: "20251104"
