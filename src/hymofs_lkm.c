@@ -500,6 +500,7 @@ static ssize_t (*hymo_kernel_read)(struct file *, void *, size_t, loff_t *);
 static int (*hymo_kern_path)(const char *, unsigned int, struct path *);
 static char *(*hymo_strndup_user)(const char __user *, long);
 static struct filename *(*hymo_getname_kernel)(const char *);
+static void (*hymo_putname)(struct filename *);
 static void (*hymo_ihold)(struct inode *);
 
 static bool hymo_reload_ksu_allowlist(void)
@@ -1541,11 +1542,15 @@ static struct filename *hook_getname_flags(const char __user *filename,
 		   hash_empty(hymo_merge_dirs)))
 		return result;
 
+	/* putname is not exported on some GKI kernels; resolve at runtime */
+	if (!hymo_putname)
+		return result;
+
 	is_absolute = (result->name[0] == '/');
 
 	/* Check hide rules (bloom filter fast-path inside) */
 	if (unlikely(hymofs_should_hide(result->name))) {
-		putname(result);
+		hymo_putname(result);
 		return ERR_PTR(-ENOENT);
 	}
 
@@ -1553,7 +1558,7 @@ static struct filename *hook_getname_flags(const char __user *filename,
 	if (likely(is_absolute) && hymo_getname_kernel) {
 		target = hymofs_resolve_target(result->name);
 		if (unlikely(target)) {
-			putname(result);
+			hymo_putname(result);
 			result = hymo_getname_kernel(target);
 			kfree(target);
 		}
@@ -1943,6 +1948,9 @@ static int __init hymofs_lkm_init(void)
 	hymo_getname_kernel = (void *)hymofs_lookup_name("getname_kernel");
 	if (!hymo_getname_kernel)
 		pr_warn("hymofs: getname_kernel not found, path redirect may fail\n");
+	hymo_putname = (void *)hymofs_lookup_name("putname");
+	if (!hymo_putname)
+		pr_warn("hymofs: putname not found, path hide/redirect disabled\n");
 
 	/* Optional: allowlist support */
 	hymo_filp_open = (void *)hymofs_lookup_name("filp_open");
