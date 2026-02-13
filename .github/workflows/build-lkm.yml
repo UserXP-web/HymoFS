@@ -1,0 +1,43 @@
+name: Build LKM (HymoFS)
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+jobs:
+  build-lkm:
+    name: Build hymofs_lkm.ko
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential flex bison libelf-dev libssl-dev
+
+      - name: Prepare kernel (modules_prepare)
+        run: |
+          KERNEL_SRC="$GITHUB_WORKSPACE/patch_workspace/lkm/common"
+          if [ ! -f "$KERNEL_SRC/Makefile" ]; then
+            echo "Kernel tree not found at $KERNEL_SRC"
+            exit 1
+          fi
+          cd "$KERNEL_SRC"
+          make ARCH=arm64 defconfig
+          make ARCH=arm64 modules_prepare
+
+      - name: Build hymofs_lkm.ko
+        run: |
+          KERNEL_SRC="$GITHUB_WORKSPACE/patch_workspace/lkm/common"
+          SRC="$GITHUB_WORKSPACE/src"
+          cd "$KERNEL_SRC"
+          make ARCH=arm64 M="$SRC" modules
+          ls -la "$SRC"/hymofs_lkm.ko
+
+      - name: Upload hymofs_lkm.ko
+        uses: actions/upload-artifact@v4
+        with:
+          name: hymofs-lkm
+          path: src/hymofs_lkm.ko
