@@ -34,7 +34,10 @@
 #define BIT_HYMO_SPOOF_KSTAT BIT(42)
 #endif // #ifdef __KERNEL__
 
-// Only one syscall command: Get anonymous FD
+/* Syscall number we hook on clean kernel. Kernel and userspace must match. */
+#define HYMO_SYSCALL_NR 448
+
+/* Only one syscall command: Get anonymous FD */
 #define HYMO_CMD_GET_FD 0x48021
 
 struct hymo_syscall_arg {

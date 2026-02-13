@@ -4,7 +4,10 @@
  *
  * Uses ftrace hooks on key VFS functions to intercept path resolution,
  * stat, directory listing, and d_path. No device node: anon fd is obtained
- * via syscall (HYMO_CMD_GET_FD). Our own HymoFS syscall (HYMO_MAGIC1/MAGIC2) calls hymo_dispatch_cmd_hook(cmd,arg); we register our handler at init.
+ * via syscall (HYMO_CMD_GET_FD). For clean kernel only: no HymoFS patch; we find
+ * sys_call_table and set_memory_* via kallsyms/kprobe and hook sys_call_table[nr]
+ * Magic in hymo_magic.h. Syscall nr: passed at insmod (hymo_syscall_nr=), no default in LKM.
+ * when insmod at post-fs-data so kernel and userspace stay in sync.
  *
  * Hooks:
  *   getname_flags  - forward path redirection (open/stat/access/...)
@@ -40,6 +43,10 @@
 #include <linux/fcntl.h>
 
 #include "hymofs_lkm.h"
+
+/* set_memory_* often not exported on GKI; we resolve via kallsyms when needed */
+typedef int (*set_memory_rw_fn)(unsigned long addr, int numpages);
+typedef int (*set_memory_ro_fn)(unsigned long addr, int numpages);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Anatdx");
@@ -181,25 +188,47 @@ static void hymofs_remove_hooks(struct hymofs_ftrace_hook *hooks, size_t count)
 #endif /* CONFIG_FUNCTION_TRACER - hook infrastructure */
 
 /* ======================================================================
- * Part 2: Symbol Resolution (unconditional -
- *          also needed for filp_open/filp_close kallsyms lookup)
+ * Part 2: Symbol Resolution via kallsyms + kprobes (no kernel export needed)
  * ====================================================================== */
 
+/* Resolved once at init via kprobe; then we use it for all lookups. */
+static unsigned long (*hymofs_kallsyms_lookup_name)(const char *name);
+
 /*
- * Resolve kernel symbol by name using kprobe trick.
- * kallsyms_lookup_name is NOT exported on GKI 5.7+, so we use
- * register_kprobe() which internally resolves the symbol for us.
+ * Resolve kernel symbol by name. We do NOT rely on the kernel exporting
+ * anything: first try to get kallsyms_lookup_name itself via kprobe, then
+ * use it for fast lookup; else fall back to per-symbol kprobe resolution.
  */
 static unsigned long hymofs_lookup_name(const char *name)
 {
-	struct kprobe kp = { .symbol_name = name };
-	unsigned long addr;
+	if (hymofs_kallsyms_lookup_name) {
+		unsigned long addr = hymofs_kallsyms_lookup_name(name);
+		if (addr)
+			return addr;
+	}
+	/* Fallback: kprobe on the target symbol gives us its address */
+	{
+		struct kprobe kp = { .symbol_name = name };
+		unsigned long addr;
+
+		if (register_kprobe(&kp) < 0)
+			return 0;
+		addr = (unsigned long)kp.addr;
+		unregister_kprobe(&kp);
+		return addr;
+	}
+}
+
+/* Call once at init to steal kallsyms_lookup_name via kprobe. */
+static void hymofs_resolve_kallsyms_lookup(void)
+{
+	struct kprobe kp = { .symbol_name = "kallsyms_lookup_name" };
 
 	if (register_kprobe(&kp) < 0)
-		return 0;
-	addr = (unsigned long)kp.addr;
+		return;
+	hymofs_kallsyms_lookup_name = (void *)kp.addr;
 	unregister_kprobe(&kp);
-	return addr;
+	pr_info("hymofs: using kallsyms_lookup_name for symbol resolution\n");
 }
 
 #ifdef CONFIG_FUNCTION_TRACER
@@ -1555,20 +1584,36 @@ int hymofs_get_anon_fd(void)
 }
 EXPORT_SYMBOL_GPL(hymofs_get_anon_fd);
 
-/*
- * HymoFS syscall (our own, e.g. for KSU) calls hymo_dispatch_cmd_hook(cmd, arg). We register this so
- * GET_FD returns the anon fd; other commands are -EINVAL (ioctl-only on the fd).
- */
-static int hymo_lkm_dispatch_for_syscall(unsigned int cmd, void __user *arg)
-{
-	if (cmd == HYMO_CMD_GET_FD)
-		return hymofs_get_anon_fd();
-	return -EINVAL;
-}
+/* Clean kernel: hook sys_call_table[nr]. nr = hymo_syscall_nr param; must be passed at insmod (no default). */
+static unsigned long *hymo_sys_call_table;
+static long (*hymo_orig_syscall_fn)(const struct pt_regs *);
+static int hymo_syscall_nr_param = 0;
+module_param_named(hymo_syscall_nr, hymo_syscall_nr_param, int, 0600);
+MODULE_PARM_DESC(hymo_syscall_nr, "Syscall number to hook. Must be passed at insmod (e.g. by metahymo post-fs-data) to match userspace; no default.");
 
-/* Kernel has hymo_dispatch_cmd_hook (from HymoFS syscall patch); we write our handler into it at init. */
-typedef int (*hymo_dispatch_fn)(unsigned int cmd, void __user *arg);
-static hymo_dispatch_fn *hymo_dispatch_cmd_hook_ptr;
+/* Our replacement syscall handler when using sys_call_table hook. ABI: regs hold (magic1, magic2, cmd, arg). */
+static long hymo_syscall_handler(const struct pt_regs *regs)
+{
+#if defined(__aarch64__)
+	unsigned long a0 = regs->regs[0];
+	unsigned long a1 = regs->regs[1];
+	unsigned long a2 = regs->regs[2];
+#elif defined(__x86_64__)
+	unsigned long a0 = regs->di;
+	unsigned long a1 = regs->si;
+	unsigned long a2 = regs->dx;
+#else
+	unsigned long a0 = 0, a1 = 0, a2 = 0;
+#endif
+	if (a0 == HYMO_MAGIC1 && a1 == HYMO_MAGIC2 && a2 == (unsigned long)HYMO_CMD_GET_FD) {
+		if (!uid_eq(current_uid(), GLOBAL_ROOT_UID))
+			return -EPERM;
+		return hymofs_get_anon_fd();
+	}
+	if (hymo_orig_syscall_fn)
+		return hymo_orig_syscall_fn(regs);
+	return -ENOSYS;
+}
 
 /* ======================================================================
  * Part 18: Hook Wrappers - Original Function Pointers
@@ -1919,13 +1964,50 @@ static int __init hymofs_lkm_init(void)
 	hash_init(hymo_xattr_sbs);
 	hash_init(hymo_merge_dirs);
 
-	/* Register with HymoFS syscall: kernel will call hymo_dispatch_cmd_hook(cmd, arg) */
-	hymo_dispatch_cmd_hook_ptr = (hymo_dispatch_fn *)hymofs_lookup_name("hymo_dispatch_cmd_hook");
-	if (hymo_dispatch_cmd_hook_ptr) {
-		*hymo_dispatch_cmd_hook_ptr = hymo_lkm_dispatch_for_syscall;
-		pr_info("hymofs: hymo_dispatch_cmd_hook registered (syscall GET_FD)\n");
-	} else
-		pr_warn("hymofs: hymo_dispatch_cmd_hook not found (kernel without HymoFS syscall?); GET_FD will fail\n");
+	/* Resolve kallsyms first so all lookups can use it (no kernel exports needed). */
+	hymofs_resolve_kallsyms_lookup();
+
+	/* Clean kernel: hook sys_call_table[nr]. nr must be passed at insmod. */
+	if (hymo_syscall_nr_param <= 0) {
+		pr_err("hymofs: hymo_syscall_nr must be positive and passed at insmod (e.g. hymo_syscall_nr=448)\n");
+		return -EINVAL;
+	}
+	{
+		const char *table_names[] = { "sys_call_table", "__arm64_sys_call_table", NULL };
+		set_memory_rw_fn fn_rw = (set_memory_rw_fn)hymofs_lookup_name("set_memory_rw");
+		set_memory_ro_fn fn_ro = (set_memory_ro_fn)hymofs_lookup_name("set_memory_ro");
+		unsigned long table_addr = 0;
+		int i;
+
+		for (i = 0; table_names[i]; i++) {
+			table_addr = hymofs_lookup_name(table_names[i]);
+			if (table_addr)
+				break;
+		}
+		if (!table_addr) {
+			pr_err("hymofs: sys_call_table not found\n");
+			return -ENOENT;
+		}
+		if (!fn_rw || !fn_ro) {
+			pr_err("hymofs: set_memory_rw/set_memory_ro not found\n");
+			return -ENOENT;
+		}
+		{
+			unsigned long *table = (unsigned long *)table_addr;
+			unsigned long entry_addr = (unsigned long)&table[hymo_syscall_nr_param];
+			unsigned long page = entry_addr & PAGE_MASK;
+
+			hymo_orig_syscall_fn = (long (*)(const struct pt_regs *))table[hymo_syscall_nr_param];
+			if (fn_rw(page, 1)) {
+				pr_err("hymofs: set_memory_rw(sys_call_table page) failed\n");
+				return -EPERM;
+			}
+			table[hymo_syscall_nr_param] = (unsigned long)hymo_syscall_handler;
+			fn_ro(page, 1);
+			hymo_sys_call_table = table;
+			pr_info("hymofs: sys_call_table[%d] hooked (GET_FD, clean kernel)\n", hymo_syscall_nr_param);
+		}
+	}
 
 	/* Install ftrace hooks */
 #ifdef CONFIG_FUNCTION_TRACER
@@ -1947,9 +2029,20 @@ static void __exit hymofs_lkm_exit(void)
 {
 	pr_info("hymofs: shutting down\n");
 
-	/* Unregister from KP so syscall no longer calls us */
-	if (hymo_dispatch_cmd_hook_ptr)
-		*hymo_dispatch_cmd_hook_ptr = NULL;
+	/* Restore sys_call_table entry */
+	if (hymo_sys_call_table && hymo_orig_syscall_fn) {
+		set_memory_rw_fn fn_rw = (set_memory_rw_fn)hymofs_lookup_name("set_memory_rw");
+		set_memory_ro_fn fn_ro = (set_memory_ro_fn)hymofs_lookup_name("set_memory_ro");
+		unsigned long entry_addr = (unsigned long)&hymo_sys_call_table[hymo_syscall_nr_param];
+		unsigned long page = entry_addr & PAGE_MASK;
+
+		if (fn_rw && fn_ro && fn_rw(page, 1) == 0) {
+			hymo_sys_call_table[hymo_syscall_nr_param] = (unsigned long)hymo_orig_syscall_fn;
+			fn_ro(page, 1);
+		}
+		hymo_sys_call_table = NULL;
+		hymo_orig_syscall_fn = NULL;
+	}
 
 	/* Remove hooks first to stop interception */
 #ifdef CONFIG_FUNCTION_TRACER
