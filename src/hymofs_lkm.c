@@ -48,6 +48,10 @@ MODULE_DESCRIPTION("HymoFS ftrace-based LKM");
 #endif
 MODULE_VERSION(HYMOFS_VERSION);
 
+/* GKI 6.1+ puts VFS symbols in a protected namespace.
+ * We must declare the import or the module loader rejects us. */
+MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);
+
 /* ======================================================================
  * Part 1: Ftrace Hook Infrastructure
  * ====================================================================== */
@@ -170,9 +174,11 @@ static void hymofs_remove_hooks(struct hymofs_ftrace_hook *hooks, size_t count)
 	for (i = 0; i < count; i++)
 		hymofs_remove_hook(&hooks[i]);
 }
+#endif /* CONFIG_FUNCTION_TRACER - hook infrastructure */
 
 /* ======================================================================
- * Part 2: Symbol Resolution
+ * Part 2: Symbol Resolution (unconditional -
+ *          also needed for filp_open/filp_close kallsyms lookup)
  * ====================================================================== */
 
 /* Try kallsyms first, fall back to kprobe trick */
@@ -195,6 +201,7 @@ static unsigned long hymofs_lookup_name(const char *name)
 	return addr;
 }
 
+#ifdef CONFIG_FUNCTION_TRACER
 static int hymofs_resolve_hook_addr(struct hymofs_ftrace_hook *hook)
 {
 	hook->address = hymofs_lookup_name(hook->name);
@@ -588,6 +595,13 @@ static void hymo_add_allow_uid(uid_t uid)
 	spin_unlock(&hymo_allow_uids_lock);
 }
 
+/*
+ * filp_open is not exported on some GKI kernels (err -2 ENOENT).
+ * Resolve via kallsyms at runtime so the module can still load.
+ */
+static struct file *(*hymo_filp_open)(const char *, int, umode_t);
+static int (*hymo_filp_close)(struct file *, fl_owner_t);
+
 static bool hymo_reload_ksu_allowlist(void)
 {
 	struct file *fp;
@@ -597,10 +611,14 @@ static bool hymo_reload_ksu_allowlist(void)
 	struct hymo_app_profile profile;
 	int count = 0;
 
+	/* filp_open not available on this kernel - skip allowlist */
+	if (!hymo_filp_open)
+		return false;
+
 	if (!mutex_trylock(&hymo_allowlist_lock))
 		return false;
 
-	fp = filp_open(HYMO_KSU_ALLOWLIST_PATH, O_RDONLY, 0);
+	fp = hymo_filp_open(HYMO_KSU_ALLOWLIST_PATH, O_RDONLY, 0);
 	if (IS_ERR(fp)) {
 		spin_lock(&hymo_allow_uids_lock);
 		xa_destroy(&hymo_allow_uids_xa);
@@ -630,12 +648,18 @@ static bool hymo_reload_ksu_allowlist(void)
 		}
 	}
 
-	filp_close(fp, NULL);
+	if (hymo_filp_close)
+		hymo_filp_close(fp, NULL);
+	else
+		fput(fp);
 	mutex_unlock(&hymo_allowlist_lock);
 	return true;
 
 bad:
-	filp_close(fp, NULL);
+	if (hymo_filp_close)
+		hymo_filp_close(fp, NULL);
+	else
+		fput(fp);
 	spin_lock(&hymo_allow_uids_lock);
 	xa_destroy(&hymo_allow_uids_xa);
 	hymo_allowlist_loaded = false;
@@ -1857,6 +1881,12 @@ static int __init hymofs_lkm_init(void)
 	int ret;
 
 	pr_info("hymofs: initializing LKM v%s\n", HYMOFS_VERSION);
+
+	/* Resolve symbols not exported on some GKI kernels */
+	hymo_filp_open = (void *)hymofs_lookup_name("filp_open");
+	hymo_filp_close = (void *)hymofs_lookup_name("filp_close");
+	if (!hymo_filp_open)
+		pr_warn("hymofs: filp_open not found, allowlist disabled\n");
 
 	/* Initialize hash tables */
 	hash_init(hymo_paths);
