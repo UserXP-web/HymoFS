@@ -1865,8 +1865,6 @@ static struct hymofs_ftrace_hook hymofs_hooks[] = {
 
 static int __init hymofs_lkm_init(void)
 {
-	int ret;
-
 	pr_info("hymofs: initializing LKM v%s\n", HYMOFS_VERSION);
 
 	/*
@@ -1912,10 +1910,12 @@ static int __init hymofs_lkm_init(void)
 
 	/* Install ftrace hooks */
 #ifdef CONFIG_FUNCTION_TRACER
-	ret = hymofs_install_hooks(hymofs_hooks, HYMOFS_HOOK_COUNT);
-	if (ret) {
-		pr_err("hymofs: hook installation failed: %d\n", ret);
-		return ret;
+	{
+		int ret = hymofs_install_hooks(hymofs_hooks, HYMOFS_HOOK_COUNT);
+		if (ret) {
+			pr_err("hymofs: hook installation failed: %d\n", ret);
+			return ret;
+		}
 	}
 	pr_info("hymofs: initialized (%zu hooks active)\n", HYMOFS_HOOK_COUNT);
 #else
