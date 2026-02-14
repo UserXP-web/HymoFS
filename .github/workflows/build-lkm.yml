@@ -32,8 +32,8 @@ jobs:
           HYMO_REPO: Anatdx/hymo
           HYMO_TRIGGER_TOKEN: ${{ secrets.HYMO_TRIGGER_TOKEN }}
           HYMOFS_REF: ${{ github.ref_name }}
-          # hymo 上运行 workflow 的分支（一般为默认分支）
-          HYMO_REF: main
+          # 触发 hymo 的哪个分支上的 workflow（与 HymoFS 分支对应：lkm → hymo lkm）
+          HYMO_REF: ${{ github.ref_name }}
         run: |
           if [ -z "$HYMO_TRIGGER_TOKEN" ]; then
             echo "HYMO_TRIGGER_TOKEN not set, skip triggering hymo."

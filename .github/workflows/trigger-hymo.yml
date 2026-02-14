@@ -10,9 +10,9 @@ on:
         required: true
         default: 'lkm'
       hymo_ref:
-        description: 'Branch of hymo repo to run workflow on'
+        description: 'Branch of hymo repo to run workflow on (e.g. lkm or main)'
         required: false
-        default: 'main'
+        default: 'lkm'
 
 jobs:
   trigger:
