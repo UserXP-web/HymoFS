@@ -1926,6 +1926,7 @@ static int __init hymofs_lkm_init(void)
 
 	/* Optional: GET_FD via SYS_reboot (142) like susfs/KernelSU kprobes; works on 5.10+ */
 	{
+		int ret;
 		static const char *reboot_symbols[] = {
 #if defined(__aarch64__)
 			"__arm64_sys_reboot", "sys_reboot", NULL
