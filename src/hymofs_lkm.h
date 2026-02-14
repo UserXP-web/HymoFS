@@ -44,6 +44,9 @@
 #define HYMO_DEFAULT_MIRROR_NAME    "hymo_mirror"
 #define HYMO_DEFAULT_MIRROR_PATH    "/dev/" HYMO_DEFAULT_MIRROR_NAME
 
+/* Max path length in getname_flags pre-handler buffer. */
+#define HYMO_PATH_BUF               512
+
 /* dir_context.actor return type: 6.1+ uses bool */
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0))
 #define HYMO_FILLDIR_RET_TYPE int
@@ -156,12 +159,11 @@ struct hymo_app_profile {
 	};
 };
 
-/* iterate_dir hook wrapper context */
+/* iterate_dir: wrapper passed as second arg so kernel calls our filldir filter. */
 struct hymofs_filldir_wrapper {
 	struct dir_context wrap_ctx;
 	struct dir_context *orig_ctx;
 	struct dentry *parent_dentry;
-	char *dir_path;
 	int dir_path_len;
 	bool dir_has_hidden;
 };

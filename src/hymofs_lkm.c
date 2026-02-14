@@ -46,6 +46,14 @@ MODULE_DESCRIPTION("HymoFS kprobes-based LKM");
 MODULE_VERSION(HYMOFS_VERSION);
 
 /*
+ * Set to 1 to register VFS kprobes (path/stat/dir hooks). Set to 0 for GET_FD only
+ * if the LKM causes bootloop on your kernel.
+ */
+#ifndef HYMOFS_VFS_KPROBES
+#define HYMOFS_VFS_KPROBES 1
+#endif
+
+/*
  * NOTE: We do NOT use MODULE_IMPORT_NS() for VFS symbols.
  * Instead, ALL VFS symbols (kern_path, kernel_read, filp_open, ihold,
  * strndup_user, getname_kernel) are resolved dynamically via kprobe
@@ -59,6 +67,20 @@ MODULE_VERSION(HYMOFS_VERSION);
 static bool hymofs_enabled;
 static atomic_t hymo_rule_count = ATOMIC_INIT(0);
 static atomic_t hymo_hide_count = ATOMIC_INIT(0);
+
+/* Per-CPU buffer and reent guard for getname_flags pre-handler. */
+static DEFINE_PER_CPU(unsigned int, hymo_kprobe_reent);
+static DEFINE_PER_CPU(char[HYMO_PATH_BUF], hymo_getname_path_buf);
+
+/* Per-CPU for vfs_getattr kretprobe: save path and kstat at entry. */
+static DEFINE_PER_CPU(const struct path *, hymo_vfs_getattr_path);
+static DEFINE_PER_CPU(struct kstat *, hymo_vfs_getattr_stat);
+/* Per-CPU for d_path kretprobe: save buf and bufsize at entry. */
+static DEFINE_PER_CPU(char *, hymo_d_path_buf);
+static DEFINE_PER_CPU(int, hymo_d_path_bufsize);
+/* Per-CPU for iterate_dir: swap ctx so kernel runs our filldir filter. */
+static DEFINE_PER_CPU(struct hymofs_filldir_wrapper, hymo_iterate_wrapper);
+static DEFINE_PER_CPU(int, hymo_iterate_did_swap);
 
 /* ======================================================================
  * Part 2: Symbol Resolution via kallsyms + kprobes (no kernel export needed)
@@ -497,7 +519,6 @@ static ssize_t (*hymo_kernel_read)(struct file *, void *, size_t, loff_t *);
 static int (*hymo_kern_path)(const char *, unsigned int, struct path *);
 static char *(*hymo_strndup_user)(const char __user *, long);
 static struct filename *(*hymo_getname_kernel)(const char *);
-static void (*hymo_putname)(struct filename *);
 static void (*hymo_ihold)(struct inode *);
 
 static bool hymo_reload_ksu_allowlist(void)
@@ -647,10 +668,10 @@ static char * __maybe_unused hymofs_resolve_target(const char *pathname)
 }
 
 /* ======================================================================
- * Part 13: Reverse Lookup
+ * Part 13: Reverse Lookup (for d_path kretprobe)
  * ====================================================================== */
 
-static int __maybe_unused hymofs_reverse_lookup(const char *pathname, char *buf, size_t buflen)
+static int hymofs_reverse_lookup(const char *pathname, char *buf, size_t buflen)
 {
 	struct hymo_entry *entry;
 	struct hymo_merge_entry *me;
@@ -664,7 +685,6 @@ static int __maybe_unused hymofs_reverse_lookup(const char *pathname, char *buf,
 
 	rcu_read_lock();
 
-	/* Check 1-to-1 mappings */
 	hlist_for_each_entry_rcu(entry,
 		&hymo_targets[hash_min(hash, HYMO_HASH_BITS)], target_node) {
 		if (strcmp(entry->target, pathname) == 0) {
@@ -672,12 +692,11 @@ static int __maybe_unused hymofs_reverse_lookup(const char *pathname, char *buf,
 			if (ret < 0)
 				ret = -ENAMETOOLONG;
 			else
-				ret = strlen(buf);
+				ret = (int)strlen(buf);
 			goto out;
 		}
 	}
 
-	/* Check merge directory mappings */
 	hash_for_each_rcu(hymo_merge_dirs, bkt, me, node) {
 		size_t target_len = strlen(me->target);
 
@@ -692,7 +711,7 @@ static int __maybe_unused hymofs_reverse_lookup(const char *pathname, char *buf,
 				memcpy(buf, me->src, src_len);
 				memcpy(buf + src_len, pathname + target_len, suffix_len);
 				buf[src_len + suffix_len] = '\0';
-				ret = src_len + suffix_len;
+				ret = (int)(src_len + suffix_len);
 			}
 			goto out;
 		}
@@ -756,33 +775,6 @@ static bool __maybe_unused hymofs_should_hide(const char *pathname)
 	}
 	rcu_read_unlock();
 	return false;
-}
-
-static bool __maybe_unused hymofs_should_spoof_mtime(const char *pathname)
-{
-	struct hymo_inject_entry *ie;
-	u32 hash;
-	bool found = false;
-	pid_t pid;
-
-	if (unlikely(!hymofs_enabled || !pathname))
-		return false;
-
-	pid = task_tgid_vnr(current);
-	if (hymo_daemon_pid > 0 && pid == hymo_daemon_pid)
-		return false;
-
-	hash = full_name_hash(NULL, pathname, strlen(pathname));
-	rcu_read_lock();
-	hlist_for_each_entry_rcu(ie,
-		&hymo_inject_dirs[hash_min(hash, HYMO_HASH_BITS)], node) {
-		if (strcmp(ie->dir, pathname) == 0) {
-			found = true;
-			break;
-		}
-	}
-	rcu_read_unlock();
-	return found;
 }
 
 static bool __maybe_unused hymofs_should_replace(const char *pathname)
@@ -1507,172 +1499,7 @@ static struct kretprobe hymo_krp_ni = {
 };
 
 /* ======================================================================
- * Part 18: Original function pointers (resolved at init for kprobe hooks)
- * ====================================================================== */
-
-static struct filename *(*orig_getname_flags)(const char __user *, int, int *);
-static int (*orig_vfs_getattr)(const struct path *, struct kstat *, u32, unsigned int);
-static char *(*orig_d_path)(const struct path *, char *, int);
-static int (*orig_iterate_dir)(struct file *, struct dir_context *);
-
-/* ======================================================================
- * Part 19: Hook - getname_flags (Forward Path Redirection)
- * ====================================================================== */
-
-static __maybe_unused struct filename *hook_getname_flags(const char __user *filename,
-					   int flags, int *empty)
-{
-	struct filename *result;
-	char *target;
-	bool is_absolute;
-
-	result = orig_getname_flags(filename, flags, empty);
-
-	/* Keep safety check for IS_ERR and early exits. */
-	if (IS_ERR(result))
-		return result;
-
-	/* Aligned with original hymofs.c hymofs_handle_getname:
-	 * bail out when all hash tables are empty. */
-	if (likely(hash_empty(hymo_paths) &&
-		   hash_empty(hymo_hide_paths) &&
-		   hash_empty(hymo_merge_dirs)))
-		return result;
-
-	/* putname is not exported on some GKI kernels; resolve at runtime */
-	if (!hymo_putname)
-		return result;
-
-	is_absolute = (result->name[0] == '/');
-
-	/* Check hide rules (bloom filter fast-path inside) */
-	if (unlikely(hymofs_should_hide(result->name))) {
-		hymo_putname(result);
-		return ERR_PTR(-ENOENT);
-	}
-
-	/* Try forward redirect (only absolute paths) */
-	if (likely(is_absolute) && hymo_getname_kernel) {
-		target = hymofs_resolve_target(result->name);
-		if (unlikely(target)) {
-			hymo_putname(result);
-			result = hymo_getname_kernel(target);
-			kfree(target);
-		}
-	}
-	return result;
-}
-
-/* ======================================================================
- * Part 20: Hook - vfs_getattr (Stat Spoofing)
- * ====================================================================== */
-
-/*
- * Fast path check: skip common system paths that never have HymoFS rules.
- * Uses dentry name for O(1) prefix check - no path allocation needed.
- */
-static inline bool hymofs_needs_stat_check(const struct path *path)
-{
-	const char *name;
-
-	if (!path || !path->dentry)
-		return false;
-
-	name = path->dentry->d_name.name;
-
-	/* Skip /dev, /proc, /sys - never have hymofs rules */
-	if (name[0] == 'd' && !strncmp(name, "dev", 3))
-		return false;
-	if (name[0] == 'p' && !strncmp(name, "proc", 4))
-		return false;
-	if (name[0] == 's' && !strncmp(name, "sys", 3))
-		return false;
-
-	return true;
-}
-
-static __maybe_unused int hook_vfs_getattr(const struct path *path, struct kstat *stat,
-			    u32 request_mask, unsigned int query_flags)
-{
-	int ret;
-	struct inode *inode;
-
-	ret = orig_vfs_getattr(path, stat, request_mask, query_flags);
-
-	/* Fast bailout: error or stealth not needed */
-	if (likely(ret != 0 || !hymo_stealth_enabled))
-		return ret;
-	if (!hymofs_needs_stat_check(path))
-		return ret;
-
-	/* Root/daemon: no spoofing needed */
-	if (unlikely(uid_eq(current_uid(), GLOBAL_ROOT_UID)))
-		return ret;
-	if (hymo_daemon_pid > 0 &&
-	    task_tgid_vnr(current) == hymo_daemon_pid)
-		return ret;
-
-	/* O(1) inode-bit checks. No path allocation. */
-	if (!path->dentry)
-		return ret;
-	inode = d_inode(path->dentry);
-	if (!inode || !inode->i_mapping)
-		return ret;
-
-	if (test_bit(AS_FLAGS_HYMO_HIDE, &inode->i_mapping->flags))
-		stat->ino ^= 0x48594D4F;
-
-	if (S_ISDIR(inode->i_mode) &&
-	    test_bit(AS_FLAGS_HYMO_DIR_HAS_HIDDEN, &inode->i_mapping->flags)) {
-		ktime_get_real_ts64(&stat->mtime);
-		stat->ctime = stat->mtime;
-	}
-
-	return ret;
-}
-
-/* ======================================================================
- * Part 21: Hook - d_path (Reverse Lookup)
- * ====================================================================== */
-
-static __maybe_unused char *hook_d_path(const struct path *path, char *buf, int bufsize)
-{
-	char *res = orig_d_path(path, buf, bufsize);
-
-	/* Keep IS_ERR check and hash_empty as secondary fast path. */
-	if (IS_ERR(res))
-		return res;
-
-	/* Root/daemon: show real paths */
-	if (unlikely(uid_eq(current_uid(), GLOBAL_ROOT_UID)))
-		return res;
-	if (hymo_daemon_pid > 0 &&
-	    task_tgid_vnr(current) == hymo_daemon_pid)
-		return res;
-
-	/* Only process if we actually have targets/merge rules */
-	if (likely(hash_empty(hymo_targets) && hash_empty(hymo_merge_dirs)))
-		return res;
-
-	/*
-	 * Use stack buffer to avoid kmalloc on every d_path call.
-	 * Android paths are typically < 256 bytes; if the reverse-mapped
-	 * path is longer, we simply skip it (rare, acceptable).
-	 * Original hymofs.c doesn't need this because the hook is inline.
-	 */
-	{
-		char temp[256];
-		int len = hymofs_reverse_lookup(res, temp, sizeof(temp));
-		if (len > 0 && len < bufsize) {
-			memcpy(buf, temp, len + 1);
-			res = buf;
-		}
-	}
-	return res;
-}
-
-/* ======================================================================
- * Part 22: Hook - iterate_dir (Directory Entry Hiding)
+ * iterate_dir: filldir filter (runs in fs callback context, not kprobe)
  * ====================================================================== */
 
 static HYMO_FILLDIR_RET_TYPE
@@ -1682,13 +1509,11 @@ hymofs_filldir_filter(struct dir_context *ctx, const char *name,
 	struct hymofs_filldir_wrapper *w =
 		container_of(ctx, struct hymofs_filldir_wrapper, wrap_ctx);
 
-	/* Skip . and .. immediately - most common entries */
 	if (unlikely(namlen <= 2 && name[0] == '.')) {
 		if (namlen == 1 || (namlen == 2 && name[1] == '.'))
 			goto passthrough;
 	}
 
-	/* Stealth: hide mirror device in /dev (cheap string compare) */
 	if (hymo_stealth_enabled && w->dir_path_len == 4) {
 		size_t mlen = strlen(hymo_current_mirror_name);
 		if ((unsigned int)namlen == mlen &&
@@ -1696,15 +1521,6 @@ hymofs_filldir_filter(struct dir_context *ctx, const char *name,
 			return HYMO_FILLDIR_CONTINUE;
 	}
 
-	/*
-	 * Hide check using dcache lookup (from original hymofs.c):
-	 * O(1) d_hash_and_lookup on parent dentry -> check inode bit.
-	 * NO string allocation, NO path building, NO hash table walk.
-	 *
-	 * CRITICAL: check allowlist BEFORE d_hash_and_lookup (aligned with
-	 * original __hymofs_check_filldir line 2276). Without this, system
-	 * processes like system_server hit d_hash_and_lookup on every entry.
-	 */
 	if (w->dir_has_hidden && w->parent_dentry &&
 	    !hymo_is_privileged_process() && hymo_should_apply_hide_rules()) {
 		struct dentry *child;
@@ -1727,76 +1543,8 @@ passthrough:
 	return w->orig_ctx->actor(w->orig_ctx, name, namlen, offset, ino, d_type);
 }
 
-static __maybe_unused int hook_iterate_dir(struct file *file, struct dir_context *ctx)
-{
-	struct hymofs_filldir_wrapper wrapper;
-	struct inode *dir_inode;
-	bool need_filter = false;
-	bool is_dev_dir = false;
-	int ret;
-
-	/* Safety checks in case the hook is entered through an indirect path. */
-	if (likely(!READ_ONCE(hymofs_enabled)))
-		return orig_iterate_dir(file, ctx);
-
-	/* Root/daemon: no filtering */
-	if (unlikely(uid_eq(current_uid(), GLOBAL_ROOT_UID)))
-		return orig_iterate_dir(file, ctx);
-	if (hymo_daemon_pid > 0 &&
-	    task_tgid_vnr(current) == hymo_daemon_pid)
-		return orig_iterate_dir(file, ctx);
-
-	/* Check inode bit: does this directory have hidden entries? */
-	wrapper.dir_has_hidden = false;
-	wrapper.parent_dentry = NULL;
-	wrapper.dir_path = NULL;
-	wrapper.dir_path_len = 0;
-
-	if (file && file->f_path.dentry) {
-		dir_inode = d_inode(file->f_path.dentry);
-		if (dir_inode && dir_inode->i_mapping)
-			wrapper.dir_has_hidden = test_bit(
-				AS_FLAGS_HYMO_DIR_HAS_HIDDEN,
-				&dir_inode->i_mapping->flags);
-		wrapper.parent_dentry = file->f_path.dentry;
-	}
-
-	/* Determine if we actually need filtering.
-	 * Aligned with original hymofs.c __hymofs_check_filldir:
-	 *   - dir_has_hidden: need to filter hidden entries (inode bit check)
-	 *   - /dev stealth: only for /dev directory, hide mirror device
-	 * Do NOT wrap ALL directories when stealth is enabled! */
-	if (wrapper.dir_has_hidden)
-		need_filter = true;
-
-	if (!need_filter && hymo_stealth_enabled && wrapper.parent_dentry) {
-		const char *dname = wrapper.parent_dentry->d_name.name;
-		if (dname[0] == 'd' && dname[1] == 'e' && dname[2] == 'v' &&
-		    dname[3] == '\0') {
-			is_dev_dir = true;
-			need_filter = true;
-		}
-	}
-
-	/* Fast path: nothing to filter -> run original directly */
-	if (likely(!need_filter))
-		return orig_iterate_dir(file, ctx);
-
-	if (is_dev_dir)
-		wrapper.dir_path_len = 4;
-
-	wrapper.wrap_ctx.actor = hymofs_filldir_filter;
-	wrapper.wrap_ctx.pos = ctx->pos;
-	wrapper.orig_ctx = ctx;
-
-	ret = orig_iterate_dir(file, &wrapper.wrap_ctx);
-	ctx->pos = wrapper.wrap_ctx.pos;
-
-	return ret;
-}
-
 /* ======================================================================
- * Part 23: Kprobe pre_handlers (call hook, set return regs, skip original)
+ * Kprobe pre_handlers (modify regs / user path only; return 0 to run original)
  * ====================================================================== */
 
 #if defined(__aarch64__)
@@ -1822,54 +1570,250 @@ static __maybe_unused int hook_iterate_dir(struct file *file, struct dir_context
 #define HYMO_POP_STACK(regs)	do { } while (0)
 #endif
 
-/*
- * getname_flags pre-handler: pass-through only. Calling hook (orig_getname_flags
- * / putname / getname_kernel) from kprobe context can hit NEON/crypto on some paths.
- */
+/* getname_flags pre-handler: only modify user path and regs; return 0 to run original. */
 static int hymo_kp_getname_flags_pre(struct kprobe *p, struct pt_regs *regs)
 {
+	const char __user *filename_user;
+	char *buf;
+	size_t len;
+	char *target;
+
 	(void)p;
-	(void)regs;
+
+	if (this_cpu_read(hymo_kprobe_reent))
+		return 0;
+	filename_user = (const char __user *)HYMO_REG0(regs);
+	if (!filename_user)
+		return 0;
+
+	buf = this_cpu_ptr(hymo_getname_path_buf);
+	if (copy_from_user(buf, filename_user, HYMO_PATH_BUF - 1))
+		return 0;
+	buf[HYMO_PATH_BUF - 1] = '\0';
+
+	if (likely(hash_empty(hymo_paths) &&
+		   hash_empty(hymo_hide_paths) &&
+		   hash_empty(hymo_merge_dirs)))
+		return 0;
+
+	/* Hide: skip original and return error (no putname needed) */
+	if (unlikely(hymofs_should_hide(buf))) {
+		this_cpu_write(hymo_kprobe_reent, 1);
+		HYMO_REG0(regs) = (unsigned long)ERR_PTR(-ENOENT);
+		instruction_pointer_set(regs, HYMO_LR(regs));
+		HYMO_POP_STACK(regs);
+#if defined(__x86_64__)
+		regs->ax = (unsigned long)ERR_PTR(-ENOENT);
+#endif
+		this_cpu_write(hymo_kprobe_reent, 0);
+		return 1;
+	}
+
+	/* Redirect: overwrite user path in place so original getname_flags sees it */
+	if (buf[0] != '/')
+		return 0;
+	target = hymofs_resolve_target(buf);
+	if (!target)
+		return 0;
+	len = strlen(target);
+	if (len >= HYMO_PATH_BUF)
+		goto out;
+	if (copy_to_user((void __user *)filename_user, target, len + 1))
+		goto out;
+	kfree(target);
+	return 0;
+out:
+	kfree(target);
 	return 0;
 }
 
-/*
- * vfs_getattr pre-handler: pass-through only. Calling orig_vfs_getattr from
- * kprobe context can go into f2fs/crypto and trigger NEON BUG like iterate_dir.
- */
+/* vfs_getattr: pre saves path and kstat for kretprobe. */
 static int hymo_kp_vfs_getattr_pre(struct kprobe *p, struct pt_regs *regs)
 {
 	(void)p;
-	(void)regs;
+	this_cpu_write(hymo_vfs_getattr_path, (const struct path *)HYMO_REG0(regs));
+	this_cpu_write(hymo_vfs_getattr_stat, (struct kstat *)HYMO_REG1(regs));
 	return 0;
 }
 
-/*
- * d_path pre-handler: pass-through only. Avoid calling into VFS from kprobe.
- */
+static inline bool hymofs_needs_stat_check(const struct path *path)
+{
+	const char *name;
+
+	if (!path || !path->dentry)
+		return false;
+	name = path->dentry->d_name.name;
+	if (name[0] == 'd' && name[1] == 'e' && name[2] == 'v' && name[3] == '\0')
+		return false;
+	if (name[0] == 'p' && !strncmp(name, "proc", 4))
+		return false;
+	if (name[0] == 's' && !strncmp(name, "sys", 3))
+		return false;
+	return true;
+}
+
+static int hymo_krp_vfs_getattr_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
+{
+	const struct path *path;
+	struct kstat *stat;
+	int ret;
+
+	(void)ri;
+#if defined(__aarch64__)
+	ret = (int)regs->regs[0];
+#elif defined(__x86_64__)
+	ret = (int)regs->ax;
+#else
+	ret = 0;
+#endif
+	if (ret != 0 || !hymo_stealth_enabled)
+		return 0;
+
+	path = this_cpu_read(hymo_vfs_getattr_path);
+	stat = this_cpu_read(hymo_vfs_getattr_stat);
+	if (!path || !stat || !path->dentry)
+		return 0;
+	if (!hymofs_needs_stat_check(path))
+		return 0;
+	if (uid_eq(current_uid(), GLOBAL_ROOT_UID))
+		return 0;
+	if (hymo_daemon_pid > 0 && task_tgid_vnr(current) == hymo_daemon_pid)
+		return 0;
+
+	{
+		struct inode *inode = d_inode(path->dentry);
+
+		if (!inode || !inode->i_mapping)
+			return 0;
+		if (test_bit(AS_FLAGS_HYMO_HIDE, &inode->i_mapping->flags))
+			stat->ino ^= 0x48594D4F;
+		if (S_ISDIR(inode->i_mode) &&
+		    test_bit(AS_FLAGS_HYMO_DIR_HAS_HIDDEN, &inode->i_mapping->flags)) {
+			ktime_get_real_ts64(&stat->mtime);
+			stat->ctime = stat->mtime;
+		}
+	}
+	return 0;
+}
+
+/* d_path: pre saves buf and bufsize for kretprobe. */
 static int hymo_kp_d_path_pre(struct kprobe *p, struct pt_regs *regs)
 {
 	(void)p;
-	(void)regs;
+	this_cpu_write(hymo_d_path_buf, (char *)HYMO_REG1(regs));
+	this_cpu_write(hymo_d_path_bufsize, (int)HYMO_REG2(regs));
 	return 0;
 }
 
-/*
- * iterate_dir pre-handler: do NOT call orig_iterate_dir from here.
- * The call chain (VFS -> f2fs -> fscrypt -> crypto -> kernel_neon_begin)
- * uses NEON; on ARM64, NEON in kprobe/brk context triggers a BUG and
- * causes bootloop. So we always pass through (return 0) and let the
- * kernel run the original. Directory hiding / dev stealth is disabled
- * for the kprobe LKM build.
- */
+static int hymo_krp_d_path_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
+{
+	char *buf;
+	int bufsize;
+	char *res;
+	char temp[256];
+	int len;
+
+	(void)ri;
+#if defined(__aarch64__)
+	res = (char *)regs->regs[0];
+#elif defined(__x86_64__)
+	res = (char *)regs->ax;
+#else
+	res = NULL;
+#endif
+	if (IS_ERR(res))
+		return 0;
+	if (uid_eq(current_uid(), GLOBAL_ROOT_UID))
+		return 0;
+	if (hymo_daemon_pid > 0 && task_tgid_vnr(current) == hymo_daemon_pid)
+		return 0;
+	if (hash_empty(hymo_targets) && hash_empty(hymo_merge_dirs))
+		return 0;
+
+	buf = this_cpu_read(hymo_d_path_buf);
+	bufsize = this_cpu_read(hymo_d_path_bufsize);
+	if (!buf || bufsize <= 0)
+		return 0;
+
+	len = hymofs_reverse_lookup(res, temp, sizeof(temp));
+	if (len > 0 && len < bufsize) {
+		memcpy(buf, temp, len + 1);
+	}
+	return 0;
+}
+
+/* iterate_dir: pre swaps ctx to our wrapper so kernel runs filldir filter. */
 static int hymo_kp_iterate_dir_pre(struct kprobe *p, struct pt_regs *regs)
 {
+	struct file *file;
+	struct hymofs_filldir_wrapper *w;
+	struct dir_context *orig_ctx;
+	struct inode *dir_inode;
+	const char *dname;
+
 	(void)p;
+	this_cpu_write(hymo_iterate_did_swap, 0);
+
+	if (!READ_ONCE(hymofs_enabled))
+		return 0;
+	if (uid_eq(current_uid(), GLOBAL_ROOT_UID))
+		return 0;
+	if (hymo_daemon_pid > 0 && task_tgid_vnr(current) == hymo_daemon_pid)
+		return 0;
+
+	file = (struct file *)HYMO_REG0(regs);
+	orig_ctx = (struct dir_context *)HYMO_REG1(regs);
+	if (!orig_ctx)
+		return 0;
+
+	w = this_cpu_ptr(&hymo_iterate_wrapper);
+	w->orig_ctx = orig_ctx;
+	w->wrap_ctx.actor = hymofs_filldir_filter;
+	w->wrap_ctx.pos = orig_ctx->pos;
+	w->parent_dentry = file && file->f_path.dentry ? file->f_path.dentry : NULL;
+	w->dir_has_hidden = false;
+	w->dir_path_len = 0;
+
+	if (w->parent_dentry) {
+		dir_inode = d_inode(w->parent_dentry);
+		if (dir_inode && dir_inode->i_mapping)
+			w->dir_has_hidden = test_bit(AS_FLAGS_HYMO_DIR_HAS_HIDDEN,
+						     &dir_inode->i_mapping->flags);
+		dname = w->parent_dentry->d_name.name;
+		if (dname[0] == 'd' && dname[1] == 'e' && dname[2] == 'v' && dname[3] == '\0')
+			w->dir_path_len = 4;
+	}
+
+	/* Only swap ctx when we need filtering (avoids per-CPU reentrancy). */
+	if (!w->dir_has_hidden && (!hymo_stealth_enabled || w->dir_path_len != 4)) {
+		this_cpu_write(hymo_iterate_did_swap, 0);
+		return 0;
+	}
+
+	this_cpu_write(hymo_iterate_did_swap, 1);
+	HYMO_REG1(regs) = (unsigned long)&w->wrap_ctx;
+	return 0;
+}
+
+/* After iterate_dir returns, copy wrapper pos back to original ctx when we swapped. */
+static int hymo_krp_iterate_dir_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
+{
+	struct hymofs_filldir_wrapper *w = this_cpu_ptr(&hymo_iterate_wrapper);
+
 	(void)regs;
+	(void)ri;
+	if (this_cpu_read(hymo_iterate_did_swap) && w->orig_ctx)
+		w->orig_ctx->pos = w->wrap_ctx.pos;
+	this_cpu_write(hymo_iterate_did_swap, 0);
 	return 0;
 }
 
 #define HYMOFS_VFS_HOOK_COUNT 4
+#define HYMOFS_VFS_IDX_GETNAME   0
+#define HYMOFS_VFS_IDX_GETATTR  1
+#define HYMOFS_VFS_IDX_DPATH    2
+#define HYMOFS_VFS_IDX_ITERDIR  3
+
 static const struct {
 	const char *name;
 	int (*pre)(struct kprobe *, struct pt_regs *);
@@ -1880,6 +1824,10 @@ static const struct {
 	{ "iterate_dir",   hymo_kp_iterate_dir_pre },
 };
 static struct kprobe hymofs_kprobes[HYMOFS_VFS_HOOK_COUNT];
+
+static struct kretprobe hymo_krp_vfs_getattr;
+static struct kretprobe hymo_krp_d_path;
+static struct kretprobe hymo_krp_iterate_dir;
 
 /* ======================================================================
  * Part 24: Module Init / Exit
@@ -1912,9 +1860,6 @@ static int __init hymofs_lkm_init(void)
 	hymo_getname_kernel = (void *)hymofs_lookup_name("getname_kernel");
 	if (!hymo_getname_kernel)
 		pr_warn("hymofs: getname_kernel not found, path redirect may fail\n");
-	hymo_putname = (void *)hymofs_lookup_name("putname");
-	if (!hymo_putname)
-		pr_warn("hymofs: putname not found, path hide/redirect disabled\n");
 
 	/* Optional: allowlist support */
 	hymo_filp_open = (void *)hymofs_lookup_name("filp_open");
@@ -1969,6 +1914,7 @@ static int __init hymofs_lkm_init(void)
 		pr_info("hymofs: GET_FD via kprobe on ni_syscall (syscall nr=%d)\n", hymo_syscall_nr_param);
 	}
 
+#if HYMOFS_VFS_KPROBES
 	/* Install VFS kprobes */
 	{
 		size_t i;
@@ -1982,12 +1928,6 @@ static int __init hymofs_lkm_init(void)
 					unregister_kprobe(&hymofs_kprobes[i]);
 				return -ENOENT;
 			}
-			switch (i) {
-			case 0: orig_getname_flags = (void *)addr; break;
-			case 1: orig_vfs_getattr = (void *)addr; break;
-			case 2: orig_d_path = (void *)addr; break;
-			case 3: orig_iterate_dir = (void *)addr; break;
-			}
 			hymofs_kprobes[i].addr = (kprobe_opcode_t *)addr;
 			hymofs_kprobes[i].pre_handler = hymofs_vfs_hooks[i].pre;
 			ret = register_kprobe(&hymofs_kprobes[i]);
@@ -2000,8 +1940,48 @@ static int __init hymofs_lkm_init(void)
 			}
 			pr_info("hymofs: kprobe %s @0x%lx\n", hymofs_vfs_hooks[i].name, addr);
 		}
+
+		/* kretprobes for vfs_getattr and d_path (modify after return) */
+		hymo_krp_vfs_getattr.kp.addr = hymofs_kprobes[HYMOFS_VFS_IDX_GETATTR].addr;
+		hymo_krp_vfs_getattr.handler = hymo_krp_vfs_getattr_ret;
+		hymo_krp_vfs_getattr.maxactive = 64;
+		ret = register_kretprobe(&hymo_krp_vfs_getattr);
+		if (ret) {
+			pr_err("hymofs: register_kretprobe(vfs_getattr) failed: %d\n", ret);
+			for (i = HYMOFS_VFS_HOOK_COUNT; i--; )
+				unregister_kprobe(&hymofs_kprobes[i]);
+			return ret;
+		}
+		hymo_krp_d_path.kp.addr = hymofs_kprobes[HYMOFS_VFS_IDX_DPATH].addr;
+		hymo_krp_d_path.handler = hymo_krp_d_path_ret;
+		hymo_krp_d_path.maxactive = 64;
+		ret = register_kretprobe(&hymo_krp_d_path);
+		if (ret) {
+			pr_err("hymofs: register_kretprobe(d_path) failed: %d\n", ret);
+			unregister_kretprobe(&hymo_krp_vfs_getattr);
+			for (i = HYMOFS_VFS_HOOK_COUNT; i--; )
+				unregister_kprobe(&hymofs_kprobes[i]);
+			return ret;
+		}
+		hymo_krp_iterate_dir.kp.addr = hymofs_kprobes[HYMOFS_VFS_IDX_ITERDIR].addr;
+		hymo_krp_iterate_dir.handler = hymo_krp_iterate_dir_ret;
+		hymo_krp_iterate_dir.maxactive = 64;
+		ret = register_kretprobe(&hymo_krp_iterate_dir);
+		if (ret) {
+			pr_err("hymofs: register_kretprobe(iterate_dir) failed: %d\n", ret);
+			unregister_kretprobe(&hymo_krp_d_path);
+			unregister_kretprobe(&hymo_krp_vfs_getattr);
+			for (i = HYMOFS_VFS_HOOK_COUNT; i--; )
+				unregister_kprobe(&hymofs_kprobes[i]);
+			return ret;
+		}
+		pr_info("hymofs: kretprobes vfs_getattr, d_path, iterate_dir registered\n");
 	}
-	pr_info("hymofs: initialized (%d VFS kprobes + GET_FD)\n", HYMOFS_VFS_HOOK_COUNT);
+	pr_info("hymofs: initialized (%d VFS kprobes + 3 kretprobes + GET_FD)\n",
+		HYMOFS_VFS_HOOK_COUNT);
+#else
+	pr_info("hymofs: initialized (GET_FD only, VFS kprobes disabled)\n");
+#endif
 	return 0;
 }
 
@@ -2012,11 +1992,16 @@ static void __exit hymofs_lkm_exit(void)
 	unregister_kretprobe(&hymo_krp_ni);
 	unregister_kprobe(&hymo_kp_ni);
 
+#if HYMOFS_VFS_KPROBES
+	unregister_kretprobe(&hymo_krp_iterate_dir);
+	unregister_kretprobe(&hymo_krp_d_path);
+	unregister_kretprobe(&hymo_krp_vfs_getattr);
 	{
 		size_t i;
 		for (i = 0; i < HYMOFS_VFS_HOOK_COUNT; i++)
 			unregister_kprobe(&hymofs_kprobes[i]);
 	}
+#endif
 
 	/* Clean up all rules and wait for RCU grace period */
 	spin_lock(&hymo_cfg_lock);

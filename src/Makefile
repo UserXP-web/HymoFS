@@ -4,7 +4,7 @@
 #   make ARCH=arm64 LLVM=1 M=/path/to/HymoFS/src modules
 #
 # From this directory (src):
-#   make clean   - remove build artifacts
+#   make clean   - remove everything except source (.c/.h), Makefile, .md
 #
 
 obj-m += hymofs_lkm.o
@@ -13,8 +13,7 @@ obj-m += hymofs_lkm.o
 ccflags-y += -gz=none
 
 clean:
-	rm -f hymofs_lkm.ko hymofs_lkm.o hymofs_lkm.mod hymofs_lkm.mod.c hymofs_lkm.mod.o
-	rm -f .hymofs_lkm.ko.cmd .hymofs_lkm.o.cmd .hymofs_lkm.mod.cmd .hymofs_lkm.mod.o.cmd
 	rm -rf .tmp_versions
-	rm -f Module.symvers modules.order
+	@# Delete all files in this dir except source, Makefile, .md, .gitignore
+	@find . -maxdepth 1 -type f ! -name '*.c' ! -name '*.h' ! -name 'Makefile' ! -name '*.md' ! -name '.gitignore' -exec rm -f {} + 2>/dev/null || true
 .PHONY: clean
