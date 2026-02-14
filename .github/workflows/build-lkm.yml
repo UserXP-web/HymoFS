@@ -40,10 +40,11 @@ jobs:
             exit 0
           fi
           echo "Triggering $HYMO_REPO workflow build.yml (hymo ref=$HYMO_REF, hymofs ref=$HYMOFS_REF)"
+          # 不传 inputs，避免目标仓库 main 上 workflow 未定义 hymofs_ref 时 422；hymo 内用默认 lkm
           resp=$(curl -sS -w "\n%{http_code}" -X POST "https://api.github.com/repos/${HYMO_REPO}/actions/workflows/build.yml/dispatches" \
             -H "Authorization: token ${HYMO_TRIGGER_TOKEN}" \
             -H "Accept: application/vnd.github.v3+json" \
-            -d "{\"ref\":\"${HYMO_REF}\",\"inputs\":{\"hymofs_ref\":\"${HYMOFS_REF}\"}}")
+            -d "{\"ref\":\"${HYMO_REF}\"}")
           code=$(echo "$resp" | tail -n1)
           echo "Response: HTTP $code"
           if [ "$code" != "204" ]; then
