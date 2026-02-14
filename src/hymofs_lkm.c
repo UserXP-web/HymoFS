@@ -1522,7 +1522,7 @@ static int (*orig_iterate_dir)(struct file *, struct dir_context *);
  * Part 19: Hook - getname_flags (Forward Path Redirection)
  * ====================================================================== */
 
-static struct filename *hook_getname_flags(const char __user *filename,
+static __maybe_unused struct filename *hook_getname_flags(const char __user *filename,
 					   int flags, int *empty)
 {
 	struct filename *result;
@@ -1594,7 +1594,7 @@ static inline bool hymofs_needs_stat_check(const struct path *path)
 	return true;
 }
 
-static int hook_vfs_getattr(const struct path *path, struct kstat *stat,
+static __maybe_unused int hook_vfs_getattr(const struct path *path, struct kstat *stat,
 			    u32 request_mask, unsigned int query_flags)
 {
 	int ret;
@@ -1638,7 +1638,7 @@ static int hook_vfs_getattr(const struct path *path, struct kstat *stat,
  * Part 21: Hook - d_path (Reverse Lookup)
  * ====================================================================== */
 
-static char *hook_d_path(const struct path *path, char *buf, int bufsize)
+static __maybe_unused char *hook_d_path(const struct path *path, char *buf, int bufsize)
 {
 	char *res = orig_d_path(path, buf, bufsize);
 
@@ -1825,65 +1825,36 @@ static __maybe_unused int hook_iterate_dir(struct file *file, struct dir_context
 #define HYMO_POP_STACK(regs)	do { } while (0)
 #endif
 
+/*
+ * getname_flags pre-handler: pass-through only. Calling hook (orig_getname_flags
+ * / putname / getname_kernel) from kprobe context can hit NEON/crypto on some paths.
+ */
 static int hymo_kp_getname_flags_pre(struct kprobe *p, struct pt_regs *regs)
 {
-	if (this_cpu_read(hymo_kprobe_reent))
-		return 0;
-	this_cpu_write(hymo_kprobe_reent, 1);
-	{
-		struct filename *r = hook_getname_flags((const char __user *)HYMO_REG0(regs),
-							(int)HYMO_REG1(regs),
-							(int *)HYMO_REG2(regs));
-		HYMO_REG0(regs) = (unsigned long)r;
-		instruction_pointer_set(regs, HYMO_LR(regs));
-		HYMO_POP_STACK(regs);
-#if defined(__x86_64__)
-		regs->ax = (unsigned long)r;
-#endif
-	}
-	this_cpu_write(hymo_kprobe_reent, 0);
-	return 1;
+	(void)p;
+	(void)regs;
+	return 0;
 }
 
+/*
+ * vfs_getattr pre-handler: pass-through only. Calling orig_vfs_getattr from
+ * kprobe context can go into f2fs/crypto and trigger NEON BUG like iterate_dir.
+ */
 static int hymo_kp_vfs_getattr_pre(struct kprobe *p, struct pt_regs *regs)
 {
-	if (this_cpu_read(hymo_kprobe_reent))
-		return 0;
-	this_cpu_write(hymo_kprobe_reent, 1);
-	{
-		int r = hook_vfs_getattr((const struct path *)HYMO_REG0(regs),
-					(struct kstat *)HYMO_REG1(regs),
-					(u32)HYMO_REG2(regs),
-					(unsigned int)HYMO_REG3(regs));
-		HYMO_REG0(regs) = (unsigned long)r;
-		instruction_pointer_set(regs, HYMO_LR(regs));
-		HYMO_POP_STACK(regs);
-#if defined(__x86_64__)
-		regs->ax = (unsigned long)r;
-#endif
-	}
-	this_cpu_write(hymo_kprobe_reent, 0);
-	return 1;
+	(void)p;
+	(void)regs;
+	return 0;
 }
 
+/*
+ * d_path pre-handler: pass-through only. Avoid calling into VFS from kprobe.
+ */
 static int hymo_kp_d_path_pre(struct kprobe *p, struct pt_regs *regs)
 {
-	if (this_cpu_read(hymo_kprobe_reent))
-		return 0;
-	this_cpu_write(hymo_kprobe_reent, 1);
-	{
-		char *r = hook_d_path((const struct path *)HYMO_REG0(regs),
-				      (char *)HYMO_REG1(regs),
-				      (int)HYMO_REG2(regs));
-		HYMO_REG0(regs) = (unsigned long)r;
-		instruction_pointer_set(regs, HYMO_LR(regs));
-		HYMO_POP_STACK(regs);
-#if defined(__x86_64__)
-		regs->ax = (unsigned long)r;
-#endif
-	}
-	this_cpu_write(hymo_kprobe_reent, 0);
-	return 1;
+	(void)p;
+	(void)regs;
+	return 0;
 }
 
 /*
