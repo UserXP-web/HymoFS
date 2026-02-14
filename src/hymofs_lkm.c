@@ -1439,9 +1439,9 @@ int hymofs_get_anon_fd(void)
 EXPORT_SYMBOL_GPL(hymofs_get_anon_fd);
 
 /* GET_FD via kprobe/kretprobe on ni_syscall: no sys_call_table patch, works on CONFIG_STRICT_KERNEL_RWX kernels. */
-static int hymo_syscall_nr_param = 0;
+static int hymo_syscall_nr_param = 142; /* __NR_reboot on aarch64; use reboot for 5.10 compatibility */
 module_param_named(hymo_syscall_nr, hymo_syscall_nr_param, int, 0600);
-MODULE_PARM_DESC(hymo_syscall_nr, "Syscall number to intercept (e.g. 448). Must be passed at insmod; we kprobe ni_syscall and match this nr.");
+MODULE_PARM_DESC(hymo_syscall_nr, "Syscall number to intercept (142=SYS_reboot on aarch64). We kprobe ni_syscall and match this nr.");
 
 /* Per-CPU: when set, kretprobe will replace return value with this fd. */
 static DEFINE_PER_CPU(int, hymo_override_fd);

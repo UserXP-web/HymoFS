@@ -34,8 +34,8 @@
 #define BIT_HYMO_SPOOF_KSTAT BIT(42)
 #endif // #ifdef __KERNEL__
 
-/* Syscall number we hook on clean kernel. Kernel and userspace must match. */
-#define HYMO_SYSCALL_NR 448
+/* Syscall number we hook (142 = SYS_reboot on aarch64; use reboot for 5.10 compatibility). */
+#define HYMO_SYSCALL_NR 142
 
 /* Only one syscall command: Get anonymous FD */
 #define HYMO_CMD_GET_FD 0x48021
