@@ -39,7 +39,7 @@
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Anatdx");
-MODULE_DESCRIPTION("HymoFS kprobes-based LKM");
+MODULE_DESCRIPTION("HymoFS LKM");
 #ifndef HYMOFS_VERSION
 #define HYMOFS_VERSION "0.1.0-dev"
 #endif
