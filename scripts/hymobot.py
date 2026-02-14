@@ -29,16 +29,18 @@ Branch: {branch}
 
 
 def get_caption():
+    commit_url = COMMIT_URL or RUN_URL or ""
+    commit_message = (COMMIT_MESSAGE or "").strip() or "(no message)"
     msg = MSG_TEMPLATE.format(
         title=TITLE,
         branch=BRANCH,
         version=VERSION,
-        commit_message=COMMIT_MESSAGE,
-        commit_url=COMMIT_URL,
+        commit_message=commit_message,
+        commit_url=commit_url,
         run_url=RUN_URL,
     )
     if len(msg) > 1024:
-        return COMMIT_URL
+        return commit_url
     return msg
 
 
@@ -54,12 +56,6 @@ def check_environ():
         CHAT_ID = int(CHAT_ID)
     except Exception:
         pass
-    if COMMIT_URL is None:
-        print("[-] Invalid COMMIT_URL")
-        exit(1)
-    if COMMIT_MESSAGE is None:
-        print("[-] Invalid COMMIT_MESSAGE")
-        exit(1)
     if RUN_URL is None:
         print("[-] Invalid RUN_URL")
         exit(1)
