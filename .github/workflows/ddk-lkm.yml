@@ -110,24 +110,6 @@ jobs:
           name: ${{ inputs.kmi }}_hymofs_lkm.ko
           path: out/${{ inputs.kmi }}_hymofs_lkm.ko
 
-      - name: Trigger hymo repo to build LKM
-        if: github.event_name != 'pull_request' && github.ref_name == 'lkm'
-        env:
-          HYMO_REPO: Anatdx/hymo
-          HYMO_TRIGGER_TOKEN: ${{ secrets.HYMO_TRIGGER_TOKEN }}
-        run: |
-          if [ -z "$HYMO_TRIGGER_TOKEN" ]; then
-            echo "HYMO_TRIGGER_TOKEN not set, skip triggering hymo."
-            exit 0
-          fi
-          REF="${{ github.ref_name }}"
-          echo "Triggering $HYMO_REPO repository_dispatch build-lkm (ref=$REF)"
-          curl -sS -X POST "https://api.github.com/repos/${HYMO_REPO}/dispatches" \
-            -H "Authorization: token ${HYMO_TRIGGER_TOKEN}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            -d "{\"event_type\":\"build-lkm\",\"client_payload\":{\"ref\":\"${REF}\"}}"
-          echo "Trigger sent."
-
       - name: Post to Telegram
         if: github.event_name != 'pull_request'
         env:

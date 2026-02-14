@@ -19,3 +19,27 @@ jobs:
     with:
       kmi: ${{ matrix.kmi }}
       ddk_release: "20251104"
+
+  trigger-hymo:
+    name: Trigger hymo build-lkm
+    needs: build-lkm
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger hymo repository_dispatch
+        env:
+          HYMO_REPO: Anatdx/hymo
+          HYMO_TRIGGER_TOKEN: ${{ secrets.HYMO_TRIGGER_TOKEN }}
+          REF: ${{ github.ref_name }}
+        run: |
+          if [ -z "$HYMO_TRIGGER_TOKEN" ]; then
+            echo "HYMO_TRIGGER_TOKEN not set, skip triggering hymo."
+            exit 0
+          fi
+          echo "Triggering $HYMO_REPO repository_dispatch build-lkm (ref=$REF)"
+          curl -sS -w "\nHTTP %{http_code}" -X POST "https://api.github.com/repos/${HYMO_REPO}/dispatches" \
+            -H "Authorization: token ${HYMO_TRIGGER_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            -d "{\"event_type\":\"build-lkm\",\"client_payload\":{\"ref\":\"${REF}\"}}"
+          echo ""
+          echo "Trigger sent."
