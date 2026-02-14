@@ -26,20 +26,29 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - name: Trigger hymo repository_dispatch
+      # 使用 workflow_dispatch API 显式触发 build.yml，避免 repository_dispatch 依赖默认分支
+      - name: Trigger hymo workflow_dispatch
         env:
           HYMO_REPO: Anatdx/hymo
           HYMO_TRIGGER_TOKEN: ${{ secrets.HYMO_TRIGGER_TOKEN }}
-          REF: ${{ github.ref_name }}
+          HYMOFS_REF: ${{ github.ref_name }}
+          # hymo 上运行 workflow 的分支（一般为默认分支）
+          HYMO_REF: main
         run: |
           if [ -z "$HYMO_TRIGGER_TOKEN" ]; then
             echo "HYMO_TRIGGER_TOKEN not set, skip triggering hymo."
             exit 0
           fi
-          echo "Triggering $HYMO_REPO repository_dispatch build-lkm (ref=$REF)"
-          curl -sS -w "\nHTTP %{http_code}" -X POST "https://api.github.com/repos/${HYMO_REPO}/dispatches" \
+          echo "Triggering $HYMO_REPO workflow build.yml (hymo ref=$HYMO_REF, hymofs ref=$HYMOFS_REF)"
+          resp=$(curl -sS -w "\n%{http_code}" -X POST "https://api.github.com/repos/${HYMO_REPO}/actions/workflows/build.yml/dispatches" \
             -H "Authorization: token ${HYMO_TRIGGER_TOKEN}" \
             -H "Accept: application/vnd.github.v3+json" \
-            -d "{\"event_type\":\"build-lkm\",\"client_payload\":{\"ref\":\"${REF}\"}}"
-          echo ""
-          echo "Trigger sent."
+            -d "{\"ref\":\"${HYMO_REF}\",\"inputs\":{\"hymofs_ref\":\"${HYMOFS_REF}\"}}")
+          code=$(echo "$resp" | tail -n1)
+          echo "Response: HTTP $code"
+          if [ "$code" != "204" ]; then
+            echo "::error::Trigger failed"
+            echo "$resp" | sed '$d'
+            exit 1
+          fi
+          echo "Trigger sent. Check Actions in $HYMO_REPO."

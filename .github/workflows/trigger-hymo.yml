@@ -1,42 +1,44 @@
-# 仅用于测试：手动运行此 workflow 会向 hymo 发送 repository_dispatch，
-# 用于验证 HYMO_TRIGGER_TOKEN 是否有效、hymo 是否收到触发。
-# Token 必须是 PAT（Personal Access Token），且对 Anatdx/hymo 有 repo 权限。
+# 仅用于测试：手动运行会通过 workflow_dispatch API 触发 hymo 的 build.yml。
+# Token 需为 PAT，且对 Anatdx/hymo 具备 repo + workflow 权限。
 name: Trigger hymo (test)
 
 on:
   workflow_dispatch:
     inputs:
-      ref:
+      hymofs_ref:
         description: 'HymoFS ref for hymo to clone (e.g. lkm, main)'
         required: true
         default: 'lkm'
+      hymo_ref:
+        description: 'Branch of hymo repo to run workflow on'
+        required: false
+        default: 'main'
 
 jobs:
   trigger:
     runs-on: ubuntu-latest
     steps:
-      - name: Trigger hymo repository_dispatch
+      - name: Trigger hymo workflow_dispatch
         env:
           HYMO_REPO: Anatdx/hymo
           HYMO_TRIGGER_TOKEN: ${{ secrets.HYMO_TRIGGER_TOKEN }}
-          REF: ${{ inputs.ref }}
+          HYMOFS_REF: ${{ inputs.hymofs_ref }}
+          HYMO_REF: ${{ inputs.hymo_ref }}
         run: |
           if [ -z "$HYMO_TRIGGER_TOKEN" ]; then
             echo "::error::HYMO_TRIGGER_TOKEN is not set in this repo's secrets."
             exit 1
           fi
-          echo "Triggering $HYMO_REPO repository_dispatch build-lkm (ref=$REF)"
-          resp=$(curl -sS -w "\n%{http_code}" -X POST "https://api.github.com/repos/${HYMO_REPO}/dispatches" \
+          echo "Triggering $HYMO_REPO workflow build.yml (hymo ref=$HYMO_REF, hymofs ref=$HYMOFS_REF)"
+          resp=$(curl -sS -w "\n%{http_code}" -X POST "https://api.github.com/repos/${HYMO_REPO}/actions/workflows/build.yml/dispatches" \
             -H "Authorization: token ${HYMO_TRIGGER_TOKEN}" \
             -H "Accept: application/vnd.github.v3+json" \
-            -d "{\"event_type\":\"build-lkm\",\"client_payload\":{\"ref\":\"${REF}\"}}")
+            -d "{\"ref\":\"${HYMO_REF}\",\"inputs\":{\"hymofs_ref\":\"${HYMOFS_REF}\"}}")
           code=$(echo "$resp" | tail -n1)
-          body=$(echo "$resp" | sed '$d')
           echo "Response: HTTP $code"
-          if [ "$code" = "204" ]; then
-            echo "Trigger sent. Check Actions in $HYMO_REPO for the new run."
-          else
+          if [ "$code" != "204" ]; then
             echo "::error::Unexpected response: $code"
-            echo "$body"
+            echo "$resp" | sed '$d'
             exit 1
           fi
+          echo "Trigger sent. Check Actions in $HYMO_REPO for the new run."
