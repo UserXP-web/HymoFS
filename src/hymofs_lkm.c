@@ -1652,47 +1652,16 @@ static inline bool hymofs_needs_stat_check(const struct path *path)
 	return true;
 }
 
+/*
+ * vfs_getattr kretprobe: stat spoofing (ino/mtime) is disabled.
+ * Per-CPU path/kstat is unsafe here: return can run on a different CPU than
+ * entry (task migration), so we would dereference stale/invalid pointers and
+ * fault. Re-enable only when using per-task or per-instance storage.
+ */
 static int hymo_krp_vfs_getattr_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
-	const struct path *path;
-	struct kstat *stat;
-	int ret;
-
 	(void)ri;
-#if defined(__aarch64__)
-	ret = (int)regs->regs[0];
-#elif defined(__x86_64__)
-	ret = (int)regs->ax;
-#else
-	ret = 0;
-#endif
-	if (ret != 0 || !hymo_stealth_enabled)
-		return 0;
-
-	path = this_cpu_read(hymo_vfs_getattr_path);
-	stat = this_cpu_read(hymo_vfs_getattr_stat);
-	if (!path || !stat || !path->dentry)
-		return 0;
-	if (!hymofs_needs_stat_check(path))
-		return 0;
-	if (uid_eq(current_uid(), GLOBAL_ROOT_UID))
-		return 0;
-	if (hymo_daemon_pid > 0 && task_tgid_vnr(current) == hymo_daemon_pid)
-		return 0;
-
-	{
-		struct inode *inode = d_inode(path->dentry);
-
-		if (!inode || !inode->i_mapping)
-			return 0;
-		if (test_bit(AS_FLAGS_HYMO_HIDE, &inode->i_mapping->flags))
-			stat->ino ^= 0x48594D4F;
-		if (S_ISDIR(inode->i_mode) &&
-		    test_bit(AS_FLAGS_HYMO_DIR_HAS_HIDDEN, &inode->i_mapping->flags)) {
-			ktime_get_real_ts64(&stat->mtime);
-			stat->ctime = stat->mtime;
-		}
-	}
+	(void)regs;
 	return 0;
 }
 
