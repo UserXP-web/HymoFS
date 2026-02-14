@@ -60,9 +60,6 @@ static bool hymofs_enabled;
 static atomic_t hymo_rule_count = ATOMIC_INIT(0);
 static atomic_t hymo_hide_count = ATOMIC_INIT(0);
 
-/* Per-CPU reentry guard for VFS kprobes (hook calls orig -> would re-enter kprobe). */
-static DEFINE_PER_CPU(unsigned int, hymo_kprobe_reent);
-
 /* ======================================================================
  * Part 2: Symbol Resolution via kallsyms + kprobes (no kernel export needed)
  * ====================================================================== */
