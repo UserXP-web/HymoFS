@@ -1438,10 +1438,10 @@ int hymofs_get_anon_fd(void)
 }
 EXPORT_SYMBOL_GPL(hymofs_get_anon_fd);
 
-/* GET_FD via kprobe/kretprobe on ni_syscall: no sys_call_table patch, works on CONFIG_STRICT_KERNEL_RWX kernels. */
-static int hymo_syscall_nr_param = 142; /* __NR_reboot on aarch64; use reboot for 5.10 compatibility */
+/* GET_FD via kprobe on ni_syscall (unused nr) or __arm64_sys_reboot (142). Default 142 = SYS_reboot for 5.10 compat. */
+static int hymo_syscall_nr_param = 142;
 module_param_named(hymo_syscall_nr, hymo_syscall_nr_param, int, 0600);
-MODULE_PARM_DESC(hymo_syscall_nr, "Syscall number to intercept (142=SYS_reboot on aarch64). We kprobe ni_syscall and match this nr.");
+MODULE_PARM_DESC(hymo_syscall_nr, "For ni_syscall path: unused syscall nr (e.g. 448). Primary path is SYS_reboot(142) via __arm64_sys_reboot kprobe.");
 
 /* Per-CPU: when set, kretprobe will replace return value with this fd. */
 static DEFINE_PER_CPU(int, hymo_override_fd);
@@ -1497,6 +1497,47 @@ static struct kprobe hymo_kp_ni = {
 static struct kretprobe hymo_krp_ni = {
 	.handler = hymo_ni_syscall_ret,
 };
+
+/*
+ * GET_FD via kprobe on __arm64_sys_reboot (same as susfs/KernelSU old kprobes).
+ * When userspace calls SYS_reboot(142) with our magic, we intercept and return fd in kretprobe.
+ * Real reboot sees invalid magic and returns -EINVAL; we overwrite return value with fd.
+ * Compatible with 5.10+; use this when ni_syscall path is not available.
+ */
+static int hymo_reboot_pre(struct kprobe *p, struct pt_regs *regs)
+{
+#if defined(__aarch64__)
+	unsigned long a0 = regs->regs[0];
+	unsigned long a1 = regs->regs[1];
+	unsigned long a2 = regs->regs[2];
+#elif defined(__x86_64__)
+	unsigned long a0 = regs->di;
+	unsigned long a1 = regs->si;
+	unsigned long a2 = regs->dx;
+#else
+	unsigned long a0 = 0, a1 = 0, a2 = 0;
+#endif
+	if (a0 != HYMO_MAGIC1 || a1 != HYMO_MAGIC2 || a2 != (unsigned long)HYMO_CMD_GET_FD)
+		return 0;
+	if (!uid_eq(current_uid(), GLOBAL_ROOT_UID))
+		return 0;
+	{
+		int fd = hymofs_get_anon_fd();
+		if (fd < 0)
+			return 0;
+		this_cpu_write(hymo_override_fd, fd);
+		this_cpu_write(hymo_override_active, 1);
+	}
+	return 0;
+}
+
+static struct kprobe hymo_kp_reboot = {
+	.pre_handler = hymo_reboot_pre,
+};
+static struct kretprobe hymo_krp_reboot = {
+	.handler = hymo_ni_syscall_ret, /* same: replace return with fd */
+};
+static int hymo_reboot_kprobe_registered;
 
 /* ======================================================================
  * iterate_dir: filldir filter (runs in fs callback context, not kprobe)
@@ -1850,7 +1891,7 @@ static int __init hymofs_lkm_init(void)
 
 	/* GET_FD: kprobe+kretprobe on ni_syscall; no sys_call_table patch. */
 	if (hymo_syscall_nr_param <= 0) {
-		pr_err("hymofs: hymo_syscall_nr must be positive and passed at insmod (e.g. hymo_syscall_nr=448)\n");
+		pr_err("hymofs: hymo_syscall_nr must be positive and passed at insmod (e.g. hymo_syscall_nr=142)\n");
 		return -EINVAL;
 	}
 	{
@@ -1881,6 +1922,42 @@ static int __init hymofs_lkm_init(void)
 			return ret;
 		}
 		pr_info("hymofs: GET_FD via kprobe on ni_syscall (syscall nr=%d)\n", hymo_syscall_nr_param);
+	}
+
+	/* Optional: GET_FD via SYS_reboot (142) like susfs/KernelSU kprobes; works on 5.10+ */
+	{
+		static const char *reboot_symbols[] = {
+#if defined(__aarch64__)
+			"__arm64_sys_reboot", "sys_reboot", NULL
+#elif defined(__x86_64__)
+			"__x64_sys_reboot", "sys_reboot", NULL
+#else
+			NULL
+#endif
+		};
+		void *reboot_addr = NULL;
+		int i;
+
+		for (i = 0; reboot_symbols[i]; i++) {
+			reboot_addr = (void *)hymofs_lookup_name(reboot_symbols[i]);
+			if (reboot_addr)
+				break;
+		}
+		if (reboot_addr) {
+			hymo_kp_reboot.addr = (kprobe_opcode_t *)reboot_addr;
+			hymo_krp_reboot.kp.addr = (kprobe_opcode_t *)reboot_addr;
+			hymo_krp_reboot.maxactive = 16;
+			ret = register_kprobe(&hymo_kp_reboot);
+			if (ret == 0) {
+				ret = register_kretprobe(&hymo_krp_reboot);
+				if (ret) {
+					unregister_kprobe(&hymo_kp_reboot);
+				} else {
+					pr_info("hymofs: GET_FD also via kprobe on %s (SYS_reboot)\n", reboot_symbols[i]);
+					hymo_reboot_kprobe_registered = 1;
+				}
+			}
+		}
 	}
 
 #if HYMOFS_VFS_KPROBES
@@ -1958,6 +2035,10 @@ static void __exit hymofs_lkm_exit(void)
 {
 	pr_info("hymofs: shutting down\n");
 
+	if (hymo_reboot_kprobe_registered) {
+		unregister_kretprobe(&hymo_krp_reboot);
+		unregister_kprobe(&hymo_kp_reboot);
+	}
 	unregister_kretprobe(&hymo_krp_ni);
 	unregister_kprobe(&hymo_kp_ni);
 

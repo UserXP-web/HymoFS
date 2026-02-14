@@ -34,7 +34,7 @@
 #define BIT_HYMO_SPOOF_KSTAT BIT(42)
 #endif // #ifdef __KERNEL__
 
-/* Syscall number we hook (142 = SYS_reboot on aarch64; use reboot for 5.10 compatibility). */
+/* Syscall number: 142 = SYS_reboot on aarch64; we kprobe __arm64_sys_reboot (5.10 compatible). */
 #define HYMO_SYSCALL_NR 142
 
 /* Only one syscall command: Get anonymous FD */
