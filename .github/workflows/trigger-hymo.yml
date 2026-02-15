@@ -24,17 +24,25 @@ jobs:
           HYMO_TRIGGER_TOKEN: ${{ secrets.HYMO_TRIGGER_TOKEN }}
           HYMOFS_REF: ${{ inputs.hymofs_ref }}
           HYMO_REF: ${{ inputs.hymo_ref }}
+          HYMOFS_SHA: ${{ github.sha }}
+          HYMOFS_MSG: ${{ github.event.head_commit.message }}
         run: |
           if [ -z "$HYMO_TRIGGER_TOKEN" ]; then
             echo "::error::HYMO_TRIGGER_TOKEN is not set in this repo's secrets."
             exit 1
           fi
-          echo "Triggering $HYMO_REPO workflow build.yml (hymo ref=$HYMO_REF, hymofs ref=$HYMOFS_REF)"
-          # 不传 inputs 以免目标仓库 workflow 未定义同名 input 时 422
+          echo "Triggering $HYMO_REPO workflow build.yml (hymo ref=$HYMO_REF, hymofs ref=$HYMOFS_REF, sha=$HYMOFS_SHA)"
+          payload=$(jq -n \
+            --arg ref "$HYMO_REF" \
+            --arg ref_name "$HYMOFS_REF" \
+            --arg sha "$HYMOFS_SHA" \
+            --arg msg "$HYMOFS_MSG" \
+            '{ref: $ref, inputs: {hymofs_ref: $ref_name, hymofs_sha: $sha, hymofs_commit_message: $msg}}')
           resp=$(curl -sS -w "\n%{http_code}" -X POST "https://api.github.com/repos/${HYMO_REPO}/actions/workflows/build.yml/dispatches" \
             -H "Authorization: token ${HYMO_TRIGGER_TOKEN}" \
             -H "Accept: application/vnd.github.v3+json" \
-            -d "{\"ref\":\"${HYMO_REF}\"}")
+            -H "Content-Type: application/json" \
+            -d "$payload")
           code=$(echo "$resp" | tail -n1)
           echo "Response: HTTP $code"
           if [ "$code" != "204" ]; then
