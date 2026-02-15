@@ -1447,6 +1447,8 @@ MODULE_PARM_DESC(hymo_syscall_nr, "For ni_syscall path: unused syscall nr (e.g. 
 /* Per-CPU: when set, kretprobe will replace return value with this fd. */
 static DEFINE_PER_CPU(int, hymo_override_fd);
 static DEFINE_PER_CPU(int, hymo_override_active);
+/* Per-CPU: pt_regs to write return value to. For reboot path on aarch64 this is real_regs. */
+static DEFINE_PER_CPU(struct pt_regs *, hymo_override_pt_regs);
 
 static int hymo_ni_syscall_pre(struct kprobe *p, struct pt_regs *regs)
 {
@@ -1475,20 +1477,26 @@ static int hymo_ni_syscall_pre(struct kprobe *p, struct pt_regs *regs)
 			return 0;
 		this_cpu_write(hymo_override_fd, fd);
 		this_cpu_write(hymo_override_active, 1);
+		this_cpu_write(hymo_override_pt_regs, regs);
 	}
 	return 0;
 }
 
 static int hymo_ni_syscall_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
+	struct pt_regs *target;
 	if (!this_cpu_read(hymo_override_active))
 		return 0;
+	target = this_cpu_read(hymo_override_pt_regs);
+	if (!target)
+		target = regs;
 #if defined(__aarch64__)
-	regs->regs[0] = this_cpu_read(hymo_override_fd);
+	target->regs[0] = this_cpu_read(hymo_override_fd);
 #elif defined(__x86_64__)
-	regs->ax = this_cpu_read(hymo_override_fd);
+	target->ax = this_cpu_read(hymo_override_fd);
 #endif
 	this_cpu_write(hymo_override_active, 0);
+	this_cpu_write(hymo_override_pt_regs, NULL);
 	return 0;
 }
 
@@ -1538,6 +1546,11 @@ static int hymo_reboot_pre(struct kprobe *p, struct pt_regs *regs)
 			return 0;
 		this_cpu_write(hymo_override_fd, fd);
 		this_cpu_write(hymo_override_active, 1);
+#if defined(__aarch64__)
+		this_cpu_write(hymo_override_pt_regs, real_regs);
+#else
+		this_cpu_write(hymo_override_pt_regs, regs);
+#endif
 	}
 	return 0;
 }
