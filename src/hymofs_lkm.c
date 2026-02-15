@@ -1521,25 +1521,49 @@ static int hymo_reboot_pre(struct kprobe *p, struct pt_regs *regs)
 {
 	/*
 	 * On aarch64 4.16+, __arm64_sys_reboot is a wrapper: first arg (regs->regs[0])
-	 * is the pointer to the real syscall pt_regs. Read magic from there (KernelSU style).
+	 * is the pointer to the real syscall pt_regs. Read magic from there.
+	 *
+	 * We use the KernelSU approach: write fd to userspace via put_user on the
+	 * 4th syscall argument (a user pointer). This avoids kretprobe return value
+	 * issues entirely — invoke_syscall would overwrite any kretprobe changes.
+	 *
+	 * Userspace: int fd = -1; syscall(SYS_reboot, M1, M2, CMD, &fd);
 	 */
 #if defined(__aarch64__)
 	struct pt_regs *real_regs;
+	unsigned long a0, a1, a2;
+	int __user *fd_ptr;
+	int fd;
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 16, 0)
 	real_regs = (struct pt_regs *)regs->regs[0];
 #else
 	real_regs = regs;
 #endif
-	unsigned long a0 = real_regs->regs[0];
-	unsigned long a1 = real_regs->regs[1];
-	unsigned long a2 = real_regs->regs[2];
+	a0 = real_regs->regs[0];
+	a1 = real_regs->regs[1];
+	a2 = real_regs->regs[2];
+
+	if (a0 != HYMO_MAGIC1 || a1 != HYMO_MAGIC2 || a2 != (unsigned long)HYMO_CMD_GET_FD)
+		return 0;
+	if (!uid_eq(current_uid(), GLOBAL_ROOT_UID))
+		return 0;
+
+	fd = hymofs_get_anon_fd();
+	if (fd < 0)
+		return 0;
+
+	/* Write fd to userspace via 4th arg pointer (like KernelSU) */
+	fd_ptr = (int __user *)(unsigned long)real_regs->regs[3];
+	if (fd_ptr) {
+		if (put_user(fd, fd_ptr))
+			pr_err("hymofs: GET_FD put_user failed\n");
+	}
 #elif defined(__x86_64__)
 	unsigned long a0 = regs->di;
 	unsigned long a1 = regs->si;
 	unsigned long a2 = regs->dx;
-#else
-	unsigned long a0 = 0, a1 = 0, a2 = 0;
-#endif
+
 	if (a0 != HYMO_MAGIC1 || a1 != HYMO_MAGIC2 || a2 != (unsigned long)HYMO_CMD_GET_FD)
 		return 0;
 	if (!uid_eq(current_uid(), GLOBAL_ROOT_UID))
@@ -1551,6 +1575,7 @@ static int hymo_reboot_pre(struct kprobe *p, struct pt_regs *regs)
 		this_cpu_write(hymo_override_fd, fd);
 		this_cpu_write(hymo_override_active, 1);
 	}
+#endif
 	return 0;
 }
 
