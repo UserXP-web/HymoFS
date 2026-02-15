@@ -113,7 +113,7 @@ jobs:
           #repo init -u https://github.com/Xiaomichael/kernel_manifest.git -b refs/heads/oneplus/${{ env.CPU }} -m ${{ env.FEIL }}.xml --depth=1
 
           echo "🔄 同步代码库(使用$(nproc --all)线程)..."
-          repo sync -c -j$(nproc --all) --no-tags --no-clone-bundle --force-sync
+          #repo sync -c -j$(nproc --all) --no-tags --no-clone-bundle --force-sync
  
           echo "✅ 内核源码克隆完成"
      
