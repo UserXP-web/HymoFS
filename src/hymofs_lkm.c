@@ -1544,33 +1544,19 @@ static int hymo_reboot_pre(struct kprobe *p, struct pt_regs *regs)
 	a1 = real_regs->regs[1];
 	a2 = real_regs->regs[2];
 
-	/* Debug: log every reboot pre (remove after fixing) */
-	pr_info("hymofs: reboot_pre a0=%lx a1=%lx a2=%lx (expect M1=%x M2=%x CMD=%x)\n",
-		a0, a1, a2, (unsigned int)HYMO_MAGIC1, (unsigned int)HYMO_MAGIC2, (unsigned int)HYMO_CMD_GET_FD);
-
 	if (a0 != HYMO_MAGIC1 || a1 != HYMO_MAGIC2 || a2 != (unsigned long)HYMO_CMD_GET_FD)
 		return 0;
-	if (!uid_eq(current_uid(), GLOBAL_ROOT_UID)) {
-		pr_info("hymofs: reboot_pre magic match but not root, uid=%u\n", __kuid_val(current_uid()));
+	if (!uid_eq(current_uid(), GLOBAL_ROOT_UID))
 		return 0;
-	}
 
 	fd = hymofs_get_anon_fd();
-	if (fd < 0) {
-		pr_err("hymofs: reboot_pre get_anon_fd failed %d\n", fd);
+	if (fd < 0)
 		return 0;
-	}
 
 	/* Write fd to userspace via 4th arg pointer (like KernelSU) */
 	fd_ptr = (int __user *)(unsigned long)real_regs->regs[3];
-	if (fd_ptr) {
-		if (put_user(fd, fd_ptr))
-			pr_err("hymofs: GET_FD put_user failed, fd_ptr=%px\n", (void *)fd_ptr);
-		else
-			pr_info("hymofs: GET_FD put_user ok fd=%d\n", fd);
-	} else {
-		pr_err("hymofs: GET_FD fd_ptr NULL (4th arg=0)\n");
-	}
+	if (fd_ptr)
+		put_user(fd, fd_ptr);
 #elif defined(__x86_64__)
 	unsigned long a0 = regs->di;
 	unsigned long a1 = regs->si;
@@ -1598,6 +1584,66 @@ static struct kretprobe hymo_krp_reboot = {
 	.handler = hymo_ni_syscall_ret, /* same: replace return with fd */
 };
 static int hymo_reboot_kprobe_registered;
+
+/*
+ * GET_FD via prctl (SECCOMP-safe). option=HYMO_PRCTL_GET_FD, arg2=(int *) for fd.
+ * No kretprobe: we put_user(fd, arg2) in pre_handler; syscall return value ignored.
+ */
+static int hymo_prctl_pre(struct kprobe *p, struct pt_regs *regs)
+{
+#if defined(__aarch64__)
+	struct pt_regs *real_regs;
+	unsigned long option;
+	unsigned long arg2;
+	int __user *fd_ptr;
+	int fd;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 16, 0)
+	real_regs = (struct pt_regs *)regs->regs[0];
+#else
+	real_regs = regs;
+#endif
+	option = real_regs->regs[0];
+	arg2 = real_regs->regs[1];
+
+	if (option != (unsigned long)HYMO_PRCTL_GET_FD)
+		return 0;
+	if (!uid_eq(current_uid(), GLOBAL_ROOT_UID))
+		return 0;
+
+	fd = hymofs_get_anon_fd();
+	if (fd < 0)
+		return 0;
+
+	fd_ptr = (int __user *)(unsigned long)arg2;
+	if (fd_ptr && put_user(fd, fd_ptr) != 0)
+		pr_err("hymofs: prctl GET_FD put_user failed\n");
+#elif defined(__x86_64__)
+	unsigned long option = regs->di;
+	unsigned long arg2 = regs->si;
+
+	if (option != (unsigned long)HYMO_PRCTL_GET_FD)
+		return 0;
+	if (!uid_eq(current_uid(), GLOBAL_ROOT_UID))
+		return 0;
+	{
+		int fd = hymofs_get_anon_fd();
+		int __user *fd_ptr;
+
+		if (fd < 0)
+			return 0;
+		fd_ptr = (int __user *)(unsigned long)arg2;
+		if (fd_ptr && put_user(fd, fd_ptr) != 0)
+			pr_err("hymofs: prctl GET_FD put_user failed\n");
+	}
+#endif
+	return 0;
+}
+
+static struct kprobe hymo_kp_prctl = {
+	.pre_handler = hymo_prctl_pre,
+};
+static int hymo_prctl_kprobe_registered;
 
 /* ======================================================================
  * iterate_dir: filldir filter (runs in fs callback context, not kprobe)
@@ -2021,6 +2067,35 @@ static int __init hymofs_lkm_init(void)
 		}
 	}
 
+	/* GET_FD via prctl (SECCOMP-safe); preferred over reboot when seccomp may block. */
+	{
+		static const char *prctl_symbols[] = {
+#if defined(__aarch64__)
+			"__arm64_sys_prctl", "sys_prctl", NULL
+#elif defined(__x86_64__)
+			"__x64_sys_prctl", "sys_prctl", NULL
+#else
+			NULL
+#endif
+		};
+		void *prctl_addr = NULL;
+		int i, ret;
+
+		for (i = 0; prctl_symbols[i]; i++) {
+			prctl_addr = (void *)hymofs_lookup_name(prctl_symbols[i]);
+			if (prctl_addr)
+				break;
+		}
+		if (prctl_addr) {
+			hymo_kp_prctl.addr = (kprobe_opcode_t *)prctl_addr;
+			ret = register_kprobe(&hymo_kp_prctl);
+			if (ret == 0) {
+				pr_info("hymofs: GET_FD also via kprobe on %s (prctl, SECCOMP-safe)\n", prctl_symbols[i]);
+				hymo_prctl_kprobe_registered = 1;
+			}
+		}
+	}
+
 #if HYMOFS_VFS_KPROBES
 	/* Install VFS kprobes */
 	{
@@ -2096,6 +2171,8 @@ static void __exit hymofs_lkm_exit(void)
 {
 	pr_info("hymofs: shutting down\n");
 
+	if (hymo_prctl_kprobe_registered)
+		unregister_kprobe(&hymo_kp_prctl);
 	if (hymo_reboot_kprobe_registered) {
 		unregister_kretprobe(&hymo_krp_reboot);
 		unregister_kprobe(&hymo_kp_reboot);
