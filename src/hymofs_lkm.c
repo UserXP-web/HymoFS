@@ -34,6 +34,7 @@
 #include <linux/anon_inodes.h>
 #include <linux/fcntl.h>
 #include <linux/percpu.h>
+#include <linux/version.h>
 
 #include "hymofs_lkm.h"
 
@@ -1506,10 +1507,20 @@ static struct kretprobe hymo_krp_ni = {
  */
 static int hymo_reboot_pre(struct kprobe *p, struct pt_regs *regs)
 {
+	/*
+	 * On aarch64 4.16+, __arm64_sys_reboot is a wrapper: first arg (regs->regs[0])
+	 * is the pointer to the real syscall pt_regs. Read magic from there (KernelSU style).
+	 */
 #if defined(__aarch64__)
-	unsigned long a0 = regs->regs[0];
-	unsigned long a1 = regs->regs[1];
-	unsigned long a2 = regs->regs[2];
+	struct pt_regs *real_regs;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 16, 0)
+	real_regs = (struct pt_regs *)regs->regs[0];
+#else
+	real_regs = regs;
+#endif
+	unsigned long a0 = real_regs->regs[0];
+	unsigned long a1 = real_regs->regs[1];
+	unsigned long a2 = real_regs->regs[2];
 #elif defined(__x86_64__)
 	unsigned long a0 = regs->di;
 	unsigned long a1 = regs->si;
