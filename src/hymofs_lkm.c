@@ -1544,20 +1544,32 @@ static int hymo_reboot_pre(struct kprobe *p, struct pt_regs *regs)
 	a1 = real_regs->regs[1];
 	a2 = real_regs->regs[2];
 
+	/* Debug: log every reboot pre (remove after fixing) */
+	pr_info("hymofs: reboot_pre a0=%lx a1=%lx a2=%lx (expect M1=%x M2=%x CMD=%x)\n",
+		a0, a1, a2, (unsigned int)HYMO_MAGIC1, (unsigned int)HYMO_MAGIC2, (unsigned int)HYMO_CMD_GET_FD);
+
 	if (a0 != HYMO_MAGIC1 || a1 != HYMO_MAGIC2 || a2 != (unsigned long)HYMO_CMD_GET_FD)
 		return 0;
-	if (!uid_eq(current_uid(), GLOBAL_ROOT_UID))
+	if (!uid_eq(current_uid(), GLOBAL_ROOT_UID)) {
+		pr_info("hymofs: reboot_pre magic match but not root, uid=%u\n", __kuid_val(current_uid()));
 		return 0;
+	}
 
 	fd = hymofs_get_anon_fd();
-	if (fd < 0)
+	if (fd < 0) {
+		pr_err("hymofs: reboot_pre get_anon_fd failed %d\n", fd);
 		return 0;
+	}
 
 	/* Write fd to userspace via 4th arg pointer (like KernelSU) */
 	fd_ptr = (int __user *)(unsigned long)real_regs->regs[3];
 	if (fd_ptr) {
 		if (put_user(fd, fd_ptr))
-			pr_err("hymofs: GET_FD put_user failed\n");
+			pr_err("hymofs: GET_FD put_user failed, fd_ptr=%px\n", (void *)fd_ptr);
+		else
+			pr_info("hymofs: GET_FD put_user ok fd=%d\n", fd);
+	} else {
+		pr_err("hymofs: GET_FD fd_ptr NULL (4th arg=0)\n");
 	}
 #elif defined(__x86_64__)
 	unsigned long a0 = regs->di;
