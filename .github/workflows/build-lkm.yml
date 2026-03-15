@@ -1,0 +1,180 @@
+name: Build LKM for HymoFS
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - feat/**
+
+jobs:
+  build-lkm:
+    strategy:
+      fail-fast: false
+      matrix:
+        kmi:
+          - android12-5.10
+          - android13-5.10
+          - android13-5.15
+          - android14-5.15
+          - android14-6.1
+          - android15-6.6
+          - android16-6.12
+    uses: ./.github/workflows/ddk-lkm.yml
+    secrets: inherit
+    with:
+      kmi: ${{ matrix.kmi }}
+      ddk_release: "20251104"
+
+  merge-lkm:
+    name: Merge all LKM artifacts
+    needs: build-lkm
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all LKM artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Merge into lkm folder
+        run: |
+          mkdir -p lkm
+          find . -name "*.ko" -path "*hymofs_lkm*" -exec cp {} lkm/ \;
+          ls -la lkm/
+
+      - name: Import GPG key
+        if: github.actor == 'Anatdx'
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          gpg --batch --import <<< "$GPG_PRIVATE_KEY"
+          gpg --list-secret-keys --keyid-format long
+
+      - name: Sign all LKM .ko files with GPG
+        if: github.actor == 'Anatdx'
+        env:
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          for ko in lkm/*.ko; do
+            [ -f "$ko" ] || continue
+            name=$(basename "$ko")
+            echo "Signing $name..."
+            gpg --detach-sign --local-user 0x942F2C75D1DC540F --batch --yes --pinentry-mode loopback \
+              --passphrase "$GPG_PASSPHRASE" \
+              --output "lkm/${name}.asc" "$ko"
+          done
+          ls -la lkm/*.asc 2>/dev/null || echo "No .ko.asc files"
+
+      - name: Upload combined LKM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hymofs-lkm-all
+          path: lkm/
+
+      - name: Create zip archive
+        run: |
+          zip -r hymofs-lkm.zip lkm/
+          ls -la hymofs-lkm.zip
+
+      - name: Sign zip with GPG
+        if: github.actor == 'Anatdx'
+        env:
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          echo "Signing hymofs-lkm.zip..."
+          gpg --detach-sign --local-user 0x942F2C75D1DC540F --batch --yes --pinentry-mode loopback \
+            --passphrase "$GPG_PASSPHRASE" \
+            --output "hymofs-lkm.zip.asc" "hymofs-lkm.zip"
+          ls -la hymofs-lkm.zip.asc
+
+      - name: Prepare and upload zip artifact
+        run: |
+          mkdir -p dist
+          cp hymofs-lkm.zip dist/
+          [ -f hymofs-lkm.zip.asc ] && cp hymofs-lkm.zip.asc dist/ || true
+
+      - name: Upload zip artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hymofs-lkm-zip
+          path: dist/
+
+  post-lkm-tg:
+    name: Post LKM zip to Telegram
+    needs: merge-lkm
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo (for scripts)
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts
+
+      - name: Download LKM zip
+        uses: actions/download-artifact@v4
+        with:
+          name: hymofs-lkm-zip
+          path: dist
+
+      - name: Post zip to Telegram
+        env:
+          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          MESSAGE_THREAD_ID: ${{ secrets.KPM_MESSAGE_THREAD_ID }}
+          SESSION_STRING: ${{ secrets.TELEGRAM_SESSION_STRING }}
+          COMMIT_URL: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TITLE: "HymoFS LKM (all KMI)"
+          VERSION: ${{ github.sha }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          if [ -z "$BOT_TOKEN" ] || [ -z "$CHAT_ID" ]; then
+            echo "BOT_TOKEN/CHAT_ID not set, skipping."
+            exit 0
+          fi
+          pip install telethon==1.34.0
+          ZIP="dist/hymofs-lkm.zip"
+          FILES="$ZIP"
+          [ -f "dist/hymofs-lkm.zip.asc" ] && FILES="$FILES dist/hymofs-lkm.zip.asc"
+          if [ -f "$ZIP" ]; then
+            python3 scripts/hymobot.py $FILES
+          else
+            echo "No zip to upload"
+          fi
+
+  trigger-hymo:
+    name: Trigger hymo build-lkm
+    needs: merge-lkm
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      # 使用 workflow_dispatch API 显式触发 build.yml（比 repository_dispatch 更可靠，可指定 ref）
+      - name: Trigger hymo workflow_dispatch
+        env:
+          HYMO_REPO: Anatdx/hymo
+          HYMO_TRIGGER_TOKEN: ${{ secrets.HYMO_TRIGGER_TOKEN }}
+          HYMOFS_REF: ${{ github.ref_name }}
+          HYMOFS_SHA: ${{ github.sha }}
+          HYMOFS_MSG: ${{ github.event.head_commit.message }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+        run: |
+          if [ -z "$HYMO_TRIGGER_TOKEN" ]; then
+            echo "HYMO_TRIGGER_TOKEN not set, skip triggering hymo."
+            exit 0
+          fi
+          echo "Triggering $HYMO_REPO workflow_dispatch build.yml (ref=main, HymoFS ref=$HYMOFS_REF)"
+          # Send only ref; do not send inputs unless hymo build.yml workflow_dispatch declares them (else HTTP 422).
+          payload=$(jq -n --arg ref "main" '{ref: $ref}')
+          resp=$(curl -sS -w "\n%{http_code}" -X POST "https://api.github.com/repos/${HYMO_REPO}/actions/workflows/build.yml/dispatches" \
+            -H "Authorization: Bearer ${HYMO_TRIGGER_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            -H "Content-Type: application/json" \
+            -d "$payload")
+          code=$(echo "$resp" | tail -n1)
+          echo "Response: HTTP $code"
+          if [ "$code" != "204" ]; then
+            echo "::error::Trigger failed"
+            echo "$resp" | sed '$d'
+            exit 1
+          fi
+          echo "Trigger sent. Check Actions in $HYMO_REPO."
