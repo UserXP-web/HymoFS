@@ -196,7 +196,7 @@ jobs:
           
       - name: "⚙️ Configure Kernel Options | 配置内核选项"
         run: |
-          cd kernel_workspace/kernel_platform
+          cd android
 
           echo "⚙️ Configuring kernel compilation options..."
 
