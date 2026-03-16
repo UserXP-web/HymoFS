@@ -6,7 +6,7 @@ env:
   CPU: sm7435 # sm8475
   FEIL: garnet # oneplus_10t
   ANDROID_VERSION: android12
-  KERNEL_VERSION: 5.10
+  KERNEL_VERSION: "5.10"
   APPLY_HYMOFS: On
 
   manifest_url: 'https://github.com/UserXP-web/kernel_build'
