@@ -132,23 +132,23 @@ jobs:
 
           echo "🔧 Configuring kernel version information..."
           # Remove -dirty in kernel version
-          sed -i 's/ -dirty//g' kernel_platform/common/scripts/setlocalversion
-          sed -i 's/ -dirty//g' kernel_platform/msm-kernel/scripts/setlocalversion
-          sed -i 's/ -dirty//g' kernel_platform/external/dtc/scripts/setlocalversion
-          sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' kernel_platform/common/scripts/setlocalversion
-          sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' kernel_platform/msm-kernel/scripts/setlocalversion
-          sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' kernel_platform/external/dtc/scripts/setlocalversion
+          #sed -i 's/ -dirty//g' kernel_platform/common/scripts/setlocalversion
+          #sed -i 's/ -dirty//g' kernel_platform/msm-kernel/scripts/setlocalversion
+          #sed -i 's/ -dirty//g' kernel_platform/external/dtc/scripts/setlocalversion
+          #sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' kernel_platform/common/scripts/setlocalversion
+          #sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' kernel_platform/msm-kernel/scripts/setlocalversion
+          #sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' kernel_platform/external/dtc/scripts/setlocalversion
           
-          if [ "${{ env.KERNEL_VERSION }}" != "6.6" ]; then
-            sed -i '$s|echo "\$res"|echo "-${{ env.ANDROID_VERSION }}-oki-xiaoxiaow"|' kernel_platform/common/scripts/setlocalversion            
-            sed -i '$s|echo "\$res"|echo "-${{ env.ANDROID_VERSION }}-oki-xiaoxiaow"|' kernel_platform/msm-kernel/scripts/setlocalversion
-            sed -i '$s|echo "\$res"|echo "-${{ env.ANDROID_VERSION }}-oki-xiaoxiaow"|' kernel_platform/external/dtc/scripts/setlocalversion
-          else
-            ESCAPED_SUFFIX=$(printf '%s\n' "-${{ env.ANDROID_VERSION }}-oki-xiaoxiaow" | sed 's:[\/&]:\\&:g')
-            sudo sed -i "s/-4k/$ESCAPED_SUFFIX/g" kernel_platform/common/arch/arm64/configs/gki_defconfig
-            sed -i 's/${scm_version}//' kernel_platform/common/scripts/setlocalversion
-            sed -i 's/${scm_version}//' kernel_platform/msm-kernel/scripts/setlocalversion
-          fi
+          #if [ "${{ env.KERNEL_VERSION }}" != "6.6" ]; then
+          #  sed -i '$s|echo "\$res"|echo "-${{ env.ANDROID_VERSION }}-oki-xiaoxiaow"|' kernel_platform/common/scripts/setlocalversion            
+          #  sed -i '$s|echo "\$res"|echo "-${{ env.ANDROID_VERSION }}-oki-xiaoxiaow"|' kernel_platform/msm-kernel/scripts/setlocalversion
+          #  sed -i '$s|echo "\$res"|echo "-${{ env.ANDROID_VERSION }}-oki-xiaoxiaow"|' kernel_platform/external/dtc/scripts/setlocalversion
+          #else
+          #  ESCAPED_SUFFIX=$(printf '%s\n' "-${{ env.ANDROID_VERSION }}-oki-xiaoxiaow" | sed 's:[\/&]:\\&:g')
+          #  sudo sed -i "s/-4k/$ESCAPED_SUFFIX/g" kernel_platform/common/arch/arm64/configs/gki_defconfig
+          #  sed -i 's/${scm_version}//' kernel_platform/common/scripts/setlocalversion
+          #  sed -i 's/${scm_version}//' kernel_platform/msm-kernel/scripts/setlocalversion
+          #fi
 
           echo "✅ Kernel configuration complete"
 
