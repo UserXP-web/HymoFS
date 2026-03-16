@@ -323,6 +323,7 @@ jobs:
           echo "✅ Kernel packaging complete: ${{ steps.set_name.outputs.ARTIFACT_NAME }}.zip"
       
       - name: Import GPG key
+        if: false
         uses: crazy-max/ghaction-import-gpg@v6
         with:
           gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
@@ -331,6 +332,7 @@ jobs:
           trust_level: 5
 
       - name: Sign ZIP with GPG
+        if: false
         run: |
           cd kernel_workspace
           ZIP_FILE=$(ls *.zip | head -n 1)
